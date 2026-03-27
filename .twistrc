@@ -1,0 +1,14 @@
+# environment and PATH stuff
+export HDF5_USE_FILE_LOCKING=0
+THIS_RC_DIR=$(dirname -- "${SCRIPT_PATH}")
+export PATH="${PATH}:${THIS_RC_DIR}/build/bin/"
+
+# autocomplete stuff
+SHELL_NAME=$(ps -o comm= $$)
+if [[ "${SHELL_NAME}" == *"zsh" ]]; then
+    fpath=(${THIS_RC_DIR}/_autocomplete $fpath)
+    autoload -Uz compinit
+    compinit
+elif [[ "${SHELL_NAME}" == *"bash" ]]; then
+    source ${THIS_RC_DIR}/_autocomplete/twist-completion.bash
+fi

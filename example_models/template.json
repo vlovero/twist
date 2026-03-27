@@ -1,0 +1,22 @@
+{
+    "name": "",
+    "system": {
+    },
+    "transforms": {
+    },
+    "aux": {
+    },
+    "constants": {
+    },
+    "spatial_period": null,
+    "diffusion": {
+    },
+    "rest_state": [
+    ],
+    "params": [
+    ],
+    "parameter_sets": {
+        "default": {
+        }
+    }
+}

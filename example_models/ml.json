@@ -1,0 +1,56 @@
+{
+    "name": "ml",
+    "system": {
+        "v": "(-(g_Ca * m_inf * (v - E_Ca)) - (g_K * w * (v - E_K)) - (g_L * (v - E_L)) + I_app) / Cm",
+        "w": "eps * ((w_inf - w) / tau)"
+    },
+    "aux": {
+        "m_inf": "0.5 * (1.0 + tanh((v - V1) / V2))",
+        "tau": "1.0 / cosh((v - V3) / (2.0 * V4))",
+        "w_inf": "0.5 * (1.0 + tanh((v - V3) / V4))"
+    },
+    "transforms": {
+        "v": [
+            55,
+            85
+        ]
+    },
+    "params": [
+        "eps",
+        "g_Ca",
+        "g_K",
+        "g_L",
+        "E_Ca",
+        "E_K",
+        "E_L",
+        "I_app",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "Cm"
+    ],
+    "diffusion": { "v": 1.0 },
+    "spatial_period": 200.0,
+    "rest_state": [
+        -29.966177170000005,
+        0.10611266
+    ],
+    "parameter_sets": {
+        "default": {
+            "eps": 0.04,
+            "g_Ca": 4.4,
+            "g_K": 8.0,
+            "g_L": 2.0,
+            "E_Ca": 120.0,
+            "E_K": -84.0,
+            "E_L": -60.0,
+            "I_app": 80.0,
+            "V1": -1.2,
+            "V2": 18.0,
+            "V3": 2.0,
+            "V4": 30.0,
+            "Cm": 20.0
+        }
+    }
+}

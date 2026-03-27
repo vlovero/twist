@@ -1,0 +1,70 @@
+{
+    "name": "br_lca",
+    "system": {
+        "V": "-(i_K1 + i_x1 + i_Na + i_s) / Cm",
+        "logCa": "(-r_Ca * i_s + k_up * (Ca_SR - exp(logCa))) / exp(logCa)",
+        "x1": "alpha_x1 * (1 - x1) - beta_x1 * x1",
+        "m": "alpha_m * (1 - m) - beta_m * m",
+        "h": "alpha_h * (1 - h) - beta_h * h",
+        "j": "alpha_j * (1 - j) - beta_j * j",
+        "d": "alpha_d * (1 - d) - beta_d * d",
+        "f": "alpha_f * (1 - f) - beta_f * f"
+    },
+    "transforms": {
+        "V": [
+            85.0,
+            120.0
+        ]
+    },
+    "aux": {
+        "V_Ca": "-82.3 - 13.0287 * logCa",
+        "i_s": "g_s * d * f * (V - V_Ca)",
+        "i_Na": "(g_Na * m ** 3 * h * j + g_NaC) * (V - V_Na)",
+        "i_x1": "A_x1 * x1 * (exp(0.04 * (V + 77)) - 1) / exp(0.04 * (V + 35))",
+        "i_K1": "A_K1 * (4 * (exp(0.04 * (V + 85)) - 1) / (exp(0.08 * (V + 53)) + exp(0.04 * (V + 53))) + 0.2 * (V + 23) / (1 - exp(-0.04 * (V + 23))))",
+        "beta_f": "0.0065 * exp(-0.02 * (V + 30)) / (exp(-0.2 * (V + 30)) + 1)",
+        "alpha_f": "0.012 * exp(-0.008 * (V + 28)) / (exp(0.15 * (V + 28)) + 1)",
+        "beta_d": "0.07 * exp(-0.017 * (V + 44)) / (exp(0.05 * (V + 44)) + 1)",
+        "alpha_d": "0.095 * exp(-0.01 * (V - 5)) / (exp(-0.072 * (V - 5)) + 1)",
+        "beta_j": "0.3 / (exp(-0.1 * (V + 32)) + 1)",
+        "alpha_j": "0.055 * exp(-0.25 * (V + 78)) / (exp(-0.2 * (V + 78)) + 1)",
+        "beta_h": "1.7 / (exp(-0.082 * (V + 22.5)) + 1)",
+        "alpha_h": "0.126 * exp(-0.25 * (V + 77))",
+        "beta_m": "(40 * exp(-0.056 * (V + 72)))",
+        "alpha_m": "(-(V + 47) / (exp(-0.1 * (V + 47)) - 1))",
+        "beta_x1": "0.0013 * exp(-0.06 * (V + 20)) / (exp(-0.04 * (V + 20)) + 1)",
+        "alpha_x1": "0.0005 * exp(0.083 * (V + 50)) / (exp(0.057 * (V + 50)) + 1)"
+    },
+    "constants": {
+        "Cm": 1,
+        "r_Ca": 1e-07,
+        "Ca_SR": 1e-07,
+        "k_up": 0.07,
+        "A_K1": 0.35,
+        "A_x1": 0.8,
+        "V_Na": 50,
+        "g_NaC": 0.003,
+        "g_s": 0.09,
+        "A_s": 40
+    },
+    "params": [
+        "g_Na"
+    ],
+    "rest_state": [
+        -83.3,
+        -15.49,
+        0.1644,
+        0.01,
+        0.9814,
+        0.9673,
+        0.0033,
+        0.9884
+    ],
+    "spatial_period": 25,
+    "diffusion": { "V": 1e-3 },
+    "parameter_sets": {
+        "default": {
+            "g_Na": 4
+        }
+    }
+}

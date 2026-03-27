@@ -1,0 +1,245 @@
+#compdef twist
+
+_twist() {
+    local context state state_descr line
+    typeset -A opt_args
+
+    _arguments -C \
+        '1: :->subcmds' \
+        '*:: :->args'
+
+    case $state in
+        subcmds)
+            local -a subcommands
+            subcommands=(
+                "build:Build generated model code"
+                "initialize:Initialize and preprocess a model"
+                "solve:Solve for initial traveling wave"
+                "continuation:Perform continuation"
+                "postprocess:Postprocess continuation data"
+                "visualize:Visualize continuation data"
+                "info:Get info about data file"
+                "tools:Apply tools to modify solutions"
+                "import:Import external data"
+                "simulate:Perform a time based simulation"
+                "local-continuation:Perform local continuation"
+            )
+            _describe -t commands 'twist subcommands' subcommands
+            ;;
+        args)
+            case $line[1] in
+                build)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '(-c --compiler)'{-c,--compiler}'=[set the compiler]:compiler:' \
+                        '(-s --source-only)'{-s,--source-only}'[Only create the source file]' \
+                        '1:file:_files'
+                    ;;
+                initialize)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '(-p --parameter-set)'{-p,--parameter-set}'=[which parameter set to be used]:parameter_set:' \
+                        '--time-ode=[time duration for local dynamics simulation]:time:' \
+                        '--time-pde=[time duration for PDE simulation]:time:' \
+                        '--stim-time=[time which stimulation is applied to variable 0]:time:' \
+                        '--stim-dur=[duration which stimulation is applied to variable 0]:duration:' \
+                        '--stim-amp=[amplitude if stimulation applied to variable 0]:amplitude:' \
+                        '--num-space=[number of points in spatial discretization]:points:' \
+                        '(-m --method)'{-m,--method}'=[method]:method:' \
+                        '(-d --display-start-and-end)'{-d,--display-start-and-end}'[show the solutions before and after performing the preprocessing]' \
+                        '(-r --refine-rest-state)'{-r,--refine-rest-state}'[Refine the supplied rest state using root-finding]' \
+                        '(-o --stop-at-ode)'{-o,--stop-at-ode}'[Stop the preprocessing after the local dynamics have been intergrated]' \
+                        '1:file:_files'
+                    ;;
+                solve)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '--parameter-set=[which parameter set to use]:parameter_set:' \
+                        '*--from-data=[using solution from continuation output]:data:_files' \
+                        '--solve-init[solve for initial traveling wave]' \
+                        '--ncol=[number of collocation points for solver to use]:ncol:' \
+                        '--nthreads=[number of OpenMP threads for solver to use]:nthreads:' \
+                        '--solve-tol=[tolerance for traveling wave solver]:tolerance:' \
+                        '--solve-geps=[global tolerance for traveling wave solution]:geps:' \
+                        '--solve-min-damp=[minimum damping factor]:min_damp:' \
+                        '--solve-max-iter=[maximum number of newton iterations]:max_iter:' \
+                        '--solve-nadapt=[number of times to adapt the mesh]:nadapt:' \
+                        '--solve-min-nodes=[minimum number of nodes required]:min_nodes:' \
+                        '--solve-max-nodes=[maximum number of nodes required]:max_nodes:' \
+                        '(-q --solve-quietly)'{-q,--solve-quietly}'[don'\''t show solver information]' \
+                        '--plot-after-solve-init[Plot the computed traveling wave]' \
+                        '--plot-dense[Plot the dense output]' \
+                        '--spectrum[Compute the spectrum]' \
+                        '--essential-spectrum[Compute the essential spectrum]' \
+                        '--essential-spectrum-filter=[expression for choosing which eigenvalues to start from]:filter:' \
+                        '--spectrum-strategy=[Which algorithm to compute the spectrum with]:strategy:' \
+                        '--subspace[Compute a subset of the spectrum]' \
+                        '--subspace-size=[How many eigenvalues to search for]:size:' \
+                        '--subspace-sigma=[Shift for the Cayley transform]:sigma:' \
+                        '--simulate[Perform a time based simulation]' \
+                        '--simulate-adaptive-mesh[Enable adaptive mesh for PDE simulation]' \
+                        '--simulate-nspace=[number of spatial grid points]:nspace:' \
+                        '--simulate-nsample=[number of temporal points]:nsample:' \
+                        '--simulate-nloops=[number of times the solution should loop]:nloops:' \
+                        '--simulate-xeps=[spatial error tolerance]:xeps:' \
+                        '--simulate-animate[animate the simulation]' \
+                        '--simulate-method=[integration method to be used]:method:' \
+                        '--simulate-save-path=[where to save the data]:path:_files' \
+                        '--add-bumps=[EXPERIMENTAL repeat wave]:bumps:' \
+                        '--simulate-vscale=[EXPERIMENTAL Scale voltage]:vscale:' \
+                        '--replace-existing-initial-guess[replace the initial traveling wave solution]' \
+                        '1:model:_files'
+                    ;;
+                continuation)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '--parameter-set=[which parameter set to use]:parameter_set:' \
+                        '*--from-data=[using solution from continuation output]:data:_files' \
+                        '(-f --forward)'{-f,--forward}'[perform continuation in forward direction]' \
+                        '(-b --backward)'{-b,--backward}'[perform continuation in backward direction]' \
+                        '(-p --parameter)'{-p,--parameter}'=[name of parameter]:parameter:' \
+                        '--ds=[initial step size]:ds:' \
+                        '--dsmin=[min step size]:dsmin:' \
+                        '--dsmax=[max step size]:dsmax:' \
+                        '--parmin=[min parameter value]:parmin:' \
+                        '--parmax=[max parameter value]:parmax:' \
+                        '--solve-init[solve for initial traveling wave]' \
+                        '--ncol=[number of collocation points for solver to use]:ncol:' \
+                        '--nthreads=[number of OpenMP threads for solver to use]:nthreads:' \
+                        '--solve-tol=[tolerance for traveling wave solver]:tolerance:' \
+                        '--solve-geps=[global tolerance for traveling wave solution]:geps:' \
+                        '--solve-min-damp=[minimum damping factor]:min_damp:' \
+                        '--solve-max-iter=[maximum number of newton iterations]:max_iter:' \
+                        '--solve-nadapt=[number of times to adapt the mesh]:nadapt:' \
+                        '--solve-min-nodes=[minimum number of nodes required]:min_nodes:' \
+                        '--solve-max-nodes=[maximum number of nodes required]:max_nodes:' \
+                        '(-q --solve-quietly)'{-q,--solve-quietly}'[don'\''t show solver information]' \
+                        '(-t --tag)'{-t,--tag}'=[tag for output file]:tag:' \
+                        '--prefix=[prefix for output file]:prefix:_files' \
+                        '--add-bumps=[EXPERIMENTAL repeat wave]:bumps:' \
+                        '1:model:_files'
+                    ;;
+                postprocess)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '(-s --spectrum)'{-s,--spectrum}'[compute spectrum for given file(s)]' \
+                        '*'{-w,--which}'=[which bifurcation points to look for]:bifurcation_points:' \
+                        '(-b --bifurcations)'{-b,--bifurcations}'[Locate bifurcation points]' \
+                        '(-l --length)'{-l,--length}'[compute how many solutions are stored]' \
+                        '--spectrum-strategy=[Which algorithm to compute the spectrum]:strategy:' \
+                        '--less-memory[Compute one spectrum at a time]' \
+                        '*:file:_files'
+                    ;;
+                visualize)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '--l2[Plot the L2 norm on the y-axis]' \
+                        '--apd[Plot the APD on the y-axis]' \
+                        '--individual[plot each subplot in its own figure]' \
+                        '--no-stability[Do not show stability]' \
+                        '--actual-spatial-period[Use the actual spatial period]' \
+                        '--center-wave[center the waves on [-L/2, L/2]]' \
+                        '--hide-bifurcation-points[Do not show any bifurcation points]' \
+                        '--print-rc-file[Print the current rc file]' \
+                        '--dashed-unstable[Make unstable branches dashed]' \
+                        '--apply-transforms[Apply specified transforms]' \
+                        '--apd-value=[What percentage of APD to use]:apd_value:' \
+                        '--dispersion-mode=[Display mode for the dispersion curve]:mode:' \
+                        '--rc-file=[Path to an rc or mplstyle file]:rc_file:_files' \
+                        '--save=[Save figures to specified path]:save_path:_files' \
+                        '--spatial-period-units=[add units to axes]:units:' \
+                        '--wave-speed-units=[Add units to wave speed axis]:units:' \
+                        '--wave-profile-units=[Add units to wave profile axis]:units:' \
+                        '*--dispersion-labels=[Add a legend with the specified labels]:label:' \
+                        '*--fixed-solutions=[Disable interactive mode and only show specified solutions]:solution:' \
+                        '*--starting-extents=[Set the extents of each axes]:extents:' \
+                        '--stable-color=[Color to indicate stable solutions]:color:' \
+                        '--unstable-color=[Color to indicate unstable solutions]:color:' \
+                        '*:file:_files'
+                    ;;
+                info)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '(-l --length)'{-l,--length}'[print how many solutions/spectra are stored]' \
+                        '(-s --spectrum)'{-s,--spectrum}'[print info about each spectrum]' \
+                        '*'{-i,--indices}'=[only use specified indices]:index:' \
+                        '(-p --show-params)'{-p,--show-params}'[Display parameter values]' \
+                        '(-m --print-meta-data)'{-m,--print-meta-data}'[Print meta data]' \
+                        '*'{-w,--which-params}'=[Only show specified parameter(s)]:param:' \
+                        '*'{-f,--filter-solution-types}'=[Only show specified solution type(s)]:param:' \
+                        '1:file:_files'
+                    ;;
+                tools)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '*'{-i,--indices}'=[which indices to apply tools to]:index:' \
+                        '(-p --prune)'{-p,--prune}'[Prune the specified solutions]' \
+                        '(-r --reverse)'{-r,--reverse}'[Reverse the order of solutions]' \
+                        '*'{-a,--append}'=[append the following]:append_file:_files' \
+                        '(-n --insert)'{-n,--insert}'=[insert the following]:insert_file:_files' \
+                        '(-f --flip-direction)'{-f,--flip-direction}'[flip the direction of the nullspace vector]' \
+                        '(-x --export-to)'{-x,--export-to}'=[export the selected solutions in specified format]:format:' \
+                        '(-s --solution-to-export)'{-s,--solution-to-export}'=[index of the desired solution to be exported]:index:' \
+                        '(-o --export-path)'{-o,--export-path}'=[path to export the data]:export_path:_files' \
+                        '*--import-initial-wave=[Generate an initial wave from an existing CSV file]:csv_file:_files' \
+                        '*--refine-between=[Take smaller continuation steps between solutions]:solutions:' \
+                        '--refine-ds=[step size to use during refinement]:step_size:' \
+                        '1:file:_files'
+                    ;;
+                import)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '(-p --parameter-set)'{-p,--parameter-set}'=[which parameter set to use]:parameter_set:' \
+                        '(-f --file-type)'{-f,--file-type}'=[which type of file is being imported]:file_type:' \
+                        '(-c --wave-speed)'{-c,--wave-speed}'=[initial estimate of the wave speed]:wave_speed:' \
+                        '--derivatives-included[Assume that derivatives are already present]' \
+                        '1:spec:_files' \
+                        '2:data:_files'
+                    ;;
+                simulate)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '--adaptive-mesh[Enable adaptive mesh for PDE simulation]' \
+                        '--nspace=[number of spatial grid points]:nspace:' \
+                        '--nsample=[number of temporal points]:nsample:' \
+                        '--nloops=[number of times the solution should loop]:nloops:' \
+                        '--xeps=[spatial error tolerance]:xeps:' \
+                        '--animate[animate the simulation]' \
+                        '--method=[integration method to be used]:method:' \
+                        '--save-data=[where to save the data]:save_path:_files' \
+                        '--vscale=[EXPERIMENTAL Scale voltage]:vscale:' \
+                        '--colorbar[show colorbar on the plot]' \
+                        '--apply-transforms[apply any transforms specified]' \
+                        '--hide-ticks[hide the x/y-axis ticks]' \
+                        '--rc-file=[path to rc/style file]:rc_file:_files' \
+                        '--colorbar-label=[label for the colorbar]:label:' \
+                        '--xlabel=[x-axis label]:xlabel:' \
+                        '--ylabel=[y-axis label]:ylabel:' \
+                        '--save-fig=[path to save the figure]:save_fig:_files' \
+                        '1:data:_files' \
+                        '2:index:'
+                    ;;
+                local-continuation)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[Show help message]' \
+                        '--parameter-set=[which parameter set to use]:parameter_set:' \
+                        '*--from-data=[using solution from continuation output]:data:_files' \
+                        '(-f --forward)'{-f,--forward}'[perform continuation in forward direction]' \
+                        '(-b --backward)'{-b,--backward}'[perform continuation in backward direction]' \
+                        '(-p --parameter)'{-p,--parameter}'=[name of parameter]:parameter:' \
+                        '--wave-speed=[initial wave speed]:wave_speed:' \
+                        '--ds=[initial step size]:ds:' \
+                        '--dsmin=[min step size]:dsmin:' \
+                        '--dsmax=[max step size]:dsmax:' \
+                        '--parmin=[min parameter value]:parmin:' \
+                        '--parmax=[max parameter value]:parmax:' \
+                        '(-t --tag)'{-t,--tag}'=[tag for output file]:tag:' \
+                        '--prefix=[prefix for output file]:prefix:_files' \
+                        '1:model:_files'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_twist "$@"

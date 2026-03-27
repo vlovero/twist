@@ -1,0 +1,23 @@
+#include <fstream>
+#include <iterator>
+#include <string_view>
+
+static const std::string_view default_script = R"TWIST(
+@FILE_CONTENT@
+)TWIST";
+
+static std::string plot_script;
+
+namespace python::interim
+{
+    void set_script(const std::string &script_path)
+    {
+        std::ifstream inputFile(script_path);
+        plot_script = std::string((std::istreambuf_iterator<char>(inputFile)), std::istreambuf_iterator<char>());
+    }
+
+    const std::string_view get_script()
+    {
+        return plot_script.empty() ? default_script : plot_script;
+    }
+} // namespace python::interim
