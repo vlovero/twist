@@ -21,6 +21,7 @@ SUCCESS_FILE = "successful_dependencies.txt"
 ALL_GIT_REPOS = (
     ("vlovero/OpenBLAS", None),
     ("vlovero/argparse", None),
+    ("vlovero/xtgevc3", None),
     ("DrTimothyAldenDavis/SuiteSparse", "v7.8.2"),
     ("fmtlib/fmt", "11.0.2"),
     ("simdjson/simdjson", "v3.10.1"),
@@ -30,6 +31,7 @@ ALL_GIT_REPOS = (
     ("p-ranav/indicators", "v2.3"),
     ("Neargye/magic_enum", "v0.9.6"),
     ("LLNL/Caliper", None),
+    ("google/benchmark", "v1.9.4"),
 )
 GMP_URL = "https://gmplib.org/download/gmp/gmp-6.3.0.tar.gz"
 ZLIB_URL = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
@@ -47,6 +49,8 @@ ALL_CMAKE_BUILDS = {
     "simdjson": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DSIMDJSON_ENABLE_THREADS=OFF -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
     "SuiteSparse": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBLA_STATIC=ON -DLAPACK_LIBRARIES={PREFIX}/lib/libopenblas.a -DBLAS_LIBRARIES={PREFIX}/lib/libopenblas.a -DLAPACK_INCLUDE_DIRS={PREFIX}/include/openblas  -DBLAS_INCLUDE_DIRS={PREFIX}/include/openblas -DSUITESPARSE_ENABLE_PROJECTS=umfpack -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
     "fmt": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFMT_TEST=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=TRUE -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
+    "benchmark", "-DBENCHMARK_DOWNLOAD_DEPENDENCIES=on -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} .."
+    "xtgevc3": "-Dfmt_DIR={PREFIX}/lib/cmake/fmt -Dbenchmark_DIR={PREFIX}/lib/cmake/benchmark -DBLA_STATIC=ON -DLAPACK_LIBRARIES={PREFIX}/lib/libopenblas.a -DBLAS_LIBRARIES={PREFIX}/lib/libopenblas.a -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
 }
 
 TWIST_CMAKE_ARGS = "-DCMAKE_BUILD_TYPE={BUILD_TYPE} -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} -DPYTHON_EXEC={PYTHON_EXEC} -DBUILD_BENCHMARKS={BUILD_BENCHMARKS} -DTWIST_SANITIZE={TWIST_SANITIZE} -DWITH_WAVE_NUMBER={WITH_WAVE_NUMBER} -DCMAKE_POLICY_VERSION_MINIMUM=4.0 -DBUILD_TESTS={BUILD_TESTS} -DTWIST_GLOBAL_INSTALL={TWIST_GLOBAL_INSTALL} -DTWIST_THREAD_SANITIZE={TWIST_THREAD_SANITIZE} -DWITH_LOCAL_CONTINUATION={WITH_LOCAL_CONTINUATION} -DUSE_BETTER_AUX={USE_BETTER_AUX} ../.."
@@ -377,12 +381,6 @@ if __name__ == "__main__":
             cache.add("__downloaded__")
             with open(SUCCESS_FILE, "w") as cache_file:
                 cache_file.write("\n".join(cache))
-
-        if args.with_benchmarks:
-            download_github_repo("google/benchmark", "v1.9.4")
-            ALL_CMAKE_BUILDS["benchmark"] = (
-                "-DBENCHMARK_DOWNLOAD_DEPENDENCIES=on -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} .."
-            )
 
         if args.local_openmp:
             download_local_openmp(prefix, env, args.verbose)

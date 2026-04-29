@@ -1,6 +1,7 @@
 #include "fmt/core.h"
 #include "linalg.h"
 #include "shared.h"
+#include "tgevc3.h"
 #include <omp.h>
 
 
@@ -612,7 +613,7 @@ void dggev4(const char *jobvl, const char *jobvr, const int n, double *A, const 
     }
     // Step 5: Eigenvectors
     if (compvl || compvr) {
-        dtgevc(&jobvec, "B", NULL, n, A, ldA, B, ldB, vl, ldvl, vr, ldvr, n, &in, work, info);
+        dtgevc3(jobvec, 'B', NULL, n, A, ldA, B, ldB, alphar, alphai, beta, vl, ldvl, vr, ldvr, n, &in, work, lwork, info);
     }
     if (compvl) {
         for (i = 0; i < n; i++) {
