@@ -83,7 +83,7 @@ set(static_libs
     ${CMAKE_SOURCE_DIR}/build/lib/libumfpack.a
     ${CMAKE_SOURCE_DIR}/build/lib/libfftw3.a
     ${CMAKE_SOURCE_DIR}/build/lib/libcaliper.a
-    ${CMAKE_SOURCE_DIR}/build/lib/xtgevc3.a
+    ${CMAKE_SOURCE_DIR}/build/lib/libxtgevc3.a
 )
 
 # ####################################################################################
