@@ -1,9 +1,9 @@
 #include "cli/cli_solve.h"
 #include "H5File.h"
 #include "cli/load.h"
+#include "cli/colors.h"
 #include "collocator.h"
 #include "fmt/base.h"
-#include "fmt/color.h"
 #include "indicators/progress_bar.hpp"
 #include "indicators/setting.hpp"
 #include "libloader.h"
@@ -133,7 +133,7 @@ int SolveArgs::run()
             collocator.solveWithAdaptation(solve_nadapt, solve_geps, (add_bumps + 1) * solve_min_nodes, solve_max_nodes, solve_tol, solve_min_damp, solve_max_iter, !solve_quietly);
         }
         if (!solve_quietly) {
-            fmt::println("{}", fmt::format(fmt::fg(fmt::color::cyan), "Finished with {} unknowns", ((collocator.getNNodes() - 1) * (collocator.getNStages() + 1) + 1) * node));
+            fmt::println(COLOR_CYAN "Finished with {} unknowns" COLOR_RESET, ((collocator.getNNodes() - 1) * (collocator.getNStages() + 1) + 1) * node);
         }
 #if ENABLE_DUMP_COL_MAT
         if (const char *env = std::getenv("DUMP_COL_MAT"); env && (*env != '0')) {
