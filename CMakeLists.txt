@@ -112,6 +112,7 @@ foreach(script_file ${SCRIPT_FILES})
     )
     list(APPEND SRC_FILES ${OUTPUT_FILE})
 endforeach()
+list(REMOVE_DUPLICATES SRC_FILES)
 
 add_executable(twist "${CMAKE_SOURCE_DIR}/twist.cpp")
 add_library(_twistlib STATIC ${SRC_FILES})

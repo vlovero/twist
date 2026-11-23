@@ -46,5 +46,6 @@ benchmarks/auto/**/*.init
 benchmarks/auto/**/*.exe
 benchmarks/auto/**/*.no_change
 misc_programs/bench*
+src/misc/*_script.cpp
 
 !cmake/FindFortran.cmake
