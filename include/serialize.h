@@ -2,6 +2,7 @@
 
 #include "H5Cpp.h"
 #include <array>
+#include <vector>
 
 template <typename data_t>
 constexpr const H5::PredType &get_h5_type()
@@ -55,15 +56,14 @@ template <typename data_t>
 void deserialize(H5::Group &group, const std::string &name, data_t &values)
 {
     size_t i, ndim, size;
-    hsize_t *dims;
     H5::DataSet dataset = group.openDataSet(name);
     H5::DataSpace dataspace = dataset.getSpace();
     auto h5_type = get_h5_type<std::remove_pointer_t<data_t>>();
 
     if constexpr (std::is_pointer_v<data_t>) {
         ndim = dataspace.getSimpleExtentNdims();
-        dims = (hsize_t *)alloca(ndim * sizeof(hsize_t));
-        dataspace.getSimpleExtentDims(dims);
+        std::vector<hsize_t> dims(ndim);
+        dataspace.getSimpleExtentDims(dims.data());
 
         for (i = 0, size = 1; i < ndim; i++) {
             size *= dims[i];
@@ -90,7 +90,6 @@ template <typename data_t>
 void deserialize(H5::Group &group, const std::string &name, data_t &values, size_t &size)
 {
     size_t i, ndim;
-    hsize_t *dims;
     H5::DataSet dataset = group.openDataSet(name);
     H5::DataSpace dataspace = dataset.getSpace();
     auto h5_type = get_h5_type<std::remove_pointer_t<data_t>>();
@@ -98,8 +97,8 @@ void deserialize(H5::Group &group, const std::string &name, data_t &values, size
     size = 1;
     if constexpr (std::is_pointer_v<data_t>) {
         ndim = dataspace.getSimpleExtentNdims();
-        dims = (hsize_t *)alloca(ndim * sizeof(hsize_t));
-        dataspace.getSimpleExtentDims(dims);
+        std::vector<hsize_t> dims(ndim);
+        dataspace.getSimpleExtentDims(dims.data());
 
         for (i = 0, size = 1; i < ndim; i++) {
             size *= dims[i];

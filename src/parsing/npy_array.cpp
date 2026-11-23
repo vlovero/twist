@@ -5,8 +5,10 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #define NPY_ARRAY_MAGIC_STRING { (char)0x93, 'N', 'U', 'M', 'P', 'Y' }
 #define NPY_ARRAY_MAJOR_VERSION_IDX 6
@@ -169,10 +171,15 @@ npy_array_t *_read_matrix(void *fp, reader_func read_func)
     header_length |= fixed_header[NPY_ARRAY_HEADER_LENGTH_LOW_IDX];
     header_length |= fixed_header[NPY_ARRAY_HEADER_LENGTH_HIGH_IDX] << 8; /* Is a byte always 8 bit? */
 
-    char header[header_length + 1];
+    char *header = (char *)malloc(header_length + 1);
+    if (!header) {
+        fprintf(stderr, "Cannot allocate memory for header.\n");
+        return NULL;
+    }
     chk = read_func(fp, header, header_length);
     if (chk != header_length) {
         fprintf(stderr, "Cannot read header. %d bytes.\n", header_length);
+        free(header);
         return NULL;
     }
     header[header_length] = '\0';
@@ -183,6 +190,7 @@ npy_array_t *_read_matrix(void *fp, reader_func read_func)
     npy_array_t *m = (npy_array_t *)calloc(1, sizeof *m);
     if (!m) {
         fprintf(stderr, "Cannot allocate memory dor matrix structure.\n");
+        free(header);
         return NULL;
     }
 
@@ -228,6 +236,7 @@ npy_array_t *_read_matrix(void *fp, reader_func read_func)
         m->ndim++;
         assert(m->ndim < NPY_ARRAY_MAX_DIMENSIONS);
     }
+    free(header);
 
     size_t n_elements = 1;
     int idx = 0;
@@ -294,6 +303,9 @@ static int64_t read_mapped(void *map, void *buffer, uint64_t nbytes)
 
 npy_array_t *npy_array_mmap(const char *filename)
 {
+#ifdef _WIN32
+    return npy_array_load(filename);
+#else
     int fd = -1;
     if ((fd = open(filename, O_RDONLY)) == -1) {
         perror(filename);
@@ -317,6 +329,7 @@ npy_array_t *npy_array_mmap(const char *filename)
         munmap(data, len);
     }
     return m;
+#endif
 }
 
 void npy_array_dump(const npy_array_t *m)
@@ -374,6 +387,7 @@ void npy_array_free(npy_array_t *m)
     }
 
     if (m->map_addr) {
+#ifndef _WIN32
         /* We need the length of the data mapped. We are mapping the whole file, so we have to
            recalculate the size.  */
         uint16_t header_length = 0;
@@ -383,6 +397,7 @@ void npy_array_free(npy_array_t *m)
 
         size_t len = NPY_ARRAY_PREHEADER_LENGTH + header_length + npy_array_calculate_datasize(m);
         munmap(m->map_addr, len);
+#endif
     }
     else
         free(m->data);

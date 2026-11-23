@@ -136,7 +136,7 @@ std::tuple<std::string, func_t, func_t, pjac_t, size_t, std::vector<double>, std
     verified_json_load(file, doc, parser);
 
     auto name = get_json_entry(doc, "name", false, is_missing);
-    std::string lib_path = fmt::format(".cache/models/lib/{}.so", std::string_view{ name.get_c_str() });
+    std::string lib_path = fmt::format(".cache/models/lib/{}{}", std::string_view{ name.get_c_str() }, TWIST_LIB_EXT);
     if (!std::filesystem::exists(lib_path)) {
         fmt::println("{} model does not have a compiled library. Make sure to create it with `twist build <path to model spec>`", std::string_view{ name.get_c_str() });
         exit(1);

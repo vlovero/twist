@@ -1,10 +1,16 @@
 #include "argparse/argparse.hpp"
 #include "cli/colors.h"
 #include "fmt/core.h"
+#include "libloader.h"
 #include "shared.h"
 
 #include <filesystem>
 #include <string_view>
+
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
 
 namespace Tests
 {
@@ -15,19 +21,22 @@ namespace Tests
         const char *program_path = nullptr;
         FILE *temp_json_file = nullptr;
         std::filesystem::path temp_file_path;
+        std::string temp_file_str;
         std::vector<std::string_view> files_to_delete;
 
     public:
         Context(const char *program_path) : program_path(program_path)
         {
+            const std::string lib_path = fmt::format(".cache/models/lib/__twist_test_model_fhn{}", TWIST_LIB_EXT);
             // delete library before running test if test has already been run
-            if (std::filesystem::exists(".cache/models/lib/__twist_test_model_fhn.so")) {
-                std::filesystem::remove(".cache/models/lib/__twist_test_model_fhn.so");
+            if (std::filesystem::exists(lib_path)) {
+                std::filesystem::remove(lib_path);
             }
             temp_file_path = std::filesystem::temp_directory_path() / "__twist_test_model_fhn.json";
+            temp_file_str = temp_file_path.string();
 
             // write source data to temp file
-            temp_json_file = fopen(temp_file_path.c_str(), "w");
+            temp_json_file = fopen(temp_file_str.c_str(), "w");
             fwrite(fhn_json_source.data(), 1, fhn_json_source.size(), temp_json_file);
             fclose(temp_json_file);
             temp_json_file = nullptr;
@@ -36,7 +45,7 @@ namespace Tests
         ~Context()
         {
             std::filesystem::remove(temp_file_path);
-            std::filesystem::remove(".cache/models/lib/__twist_test_model_fhn.so");
+            std::filesystem::remove(fmt::format(".cache/models/lib/__twist_test_model_fhn{}", TWIST_LIB_EXT));
             std::filesystem::remove(".cache/models/src/__twist_test_model_fhn.cpp");
             for (const auto &path : files_to_delete) {
                 std::filesystem::remove(path);
@@ -53,9 +62,9 @@ namespace Tests
             return program_path;
         }
 
-        auto cpath() const
+        const char *cpath() const
         {
-            return temp_file_path.c_str();
+            return temp_file_str.c_str();
         }
     };
 

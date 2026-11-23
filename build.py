@@ -37,9 +37,11 @@ GMP_URL = "https://gmplib.org/download/gmp/gmp-6.3.0.tar.gz"
 ZLIB_URL = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
 FFTW_URL = "https://fftw.org/fftw-3.3.10.tar.gz"
 
+FFTW_SIMD_FLAGS = "-DENABLE_SSE=ON -DENABLE_SSE2=ON -DENABLE_AVX=ON -DENABLE_AVX2=ON " if platform.machine().lower() in ("x86_64", "amd64", "i386", "i686") else ""
+
 ALL_CMAKE_BUILDS = {
     "Caliper": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX={PREFIX} -DBUILD_SHARED_LIBS=OFF ..",
-    "fftw": "-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DENABLE_SSE=ON -DENABLE_SSE2=ON -DENABLE_AVX=ON -DENABLE_AVX2=ON -DDISABLE_FORTRAN=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..",
+    "fftw": f"-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF {FFTW_SIMD_FLAGS}-DDISABLE_FORTRAN=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={{PREFIX}} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..",
     "OpenBLAS": "-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..",
     "indicators": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_STANDARD=20 -DINDICATORS_SAMPLES=OFF -DINDICATORS_DEMO=OFF -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
     "argparse": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DARGPARSE_BUILD_SAMPLES=off -DARGPARSE_BUILD_TESTS=off -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
@@ -159,9 +161,9 @@ def download_local_openmp(prefix, env, show_output):
         run_process("openmp", "checkout", env, ["git", "checkout"], show_output, _exit=False)
 
 
-    # instructions to build openmpmp
+    # instructions to build openmp
     ALL_CMAKE_BUILDS = {
-        "llvm-project/openmp": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${PREFIX} -DBUILD_SHARED_LIBS=OFF -DLIBOMP_ENABLE_SHARED=OFF ..",
+        "llvm-project/openmp": "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX={PREFIX} -DBUILD_SHARED_LIBS=OFF -DLIBOMP_ENABLE_SHARED=OFF ..",
         **ALL_CMAKE_BUILDS,
     }
     env["OpenMP_ROOT"] = prefix
@@ -184,7 +186,11 @@ def run_process(name, what, env, cmd, show_output, _exit=True):
 
 def run_base_checks(env, show_output):
     # check for cli tools that are needed
-    for cmd in ("cmake", "git", "gfortran"):
+    required_cmds = ["cmake", "git", "gfortran", "make"]
+    if platform.system() == "Windows":
+        required_cmds.append("sh")
+
+    for cmd in required_cmds:
         if shutil.which(cmd) is None:
             log_error(f"{cmd} wasn't found. Make sure the {cmd} executable is in your PATH")
             exit(1)
@@ -229,15 +235,21 @@ def build_gmp(prefix: str, env: dict, cache: set, show_output: bool):
         log_status("gmp", True)
         return
 
+    gmp_prefix = prefix
+    if platform.system() == "Windows" and shutil.which("cygpath") is not None:
+        gmp_prefix = check_output(["cygpath", "-u", prefix]).decode().strip()
+
     with dir_as("gmp-6.3.0"):
         print("Working on: gmp")
-        cmd = ["./configure", f"--{prefix=!s}", "--with-pic"]
+        cmd = ["sh", "./configure", f"--prefix={gmp_prefix}", "--with-pic", "--disable-shared", "--enable-static"]
         run_process("gmp", "configure", env, cmd, show_output)
         run_process("gmp", "build", env, ["make"], show_output)
         run_process("gmp", "install", env, ["make", "install"], show_output)
 
     paths = glob(os.path.join(prefix, "lib/libgmp*.so"))
     paths.extend(glob(os.path.join(prefix, "lib/libgmp*.dylib")))
+    paths.extend(glob(os.path.join(prefix, "lib/libgmp*.dll.a")))
+    paths.extend(glob(os.path.join(prefix, "bin/libgmp*.dll")))
     for path in paths:
         os.remove(path)
 
@@ -332,7 +344,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if not args.local_install:
+    if not args.local_install and platform.system() != "Windows":
         if not os.access("/usr/local/bin", os.W_OK | os.F_OK):
             print("/usr/local/bin either does not exist or you do not have permission to write to it. Use the --local-install flag")
             exit(1)
@@ -342,7 +354,7 @@ if __name__ == "__main__":
     TWIST_SANITIZE = CMAKE_ONOFF[args.with_sanitizers]
     TWIST_THREAD_SANITIZE = CMAKE_ONOFF[args.with_thread_sanitizers]
     WITH_WAVE_NUMBER = CMAKE_ONOFF[args.with_wave_number]
-    TWIST_GLOBAL_INSTALL = CMAKE_ONOFF[not args.local_install]
+    TWIST_GLOBAL_INSTALL = CMAKE_ONOFF[(not args.local_install) and (platform.system() != "Windows")]
     WITH_LOCAL_CONTINUATION = CMAKE_ONOFF[args.with_local_continuation]
     USE_BETTER_AUX = CMAKE_ONOFF[args.use_better_aux]
     if args.debug:
@@ -418,7 +430,8 @@ if __name__ == "__main__":
             if parallel_builds:
                 cmd.append("--parallel")
             run_process("TWIST", "build", env, cmd, True)
-            shutil.move("compile_commands.json", "../compile_commands.json")
+            if os.path.exists("compile_commands.json"):
+                shutil.move("compile_commands.json", "../compile_commands.json")
 
         if args.remove_git_dependencies:
             for name in [*ALL_CMAKE_BUILDS.keys(), "gmp-6.3.0", "magic_enum"]:

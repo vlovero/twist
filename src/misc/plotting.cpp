@@ -6,6 +6,11 @@
 
 #include <filesystem>
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 
 void solve_plot(bool plot_after_solve_init, bool plot_dense, bool spectrum, int N, int node, int ncol, int nnodes, double *t, double *tc, double *y, double *td, double *yd, const std::vector<double> &alphar, const std::vector<double> &alphai, const std::vector<double> &beta, const std::vector<std::string> &var_names)
 {
@@ -68,11 +73,11 @@ int run_python_script(const std::string_view &script, const std::vector<std::str
 
     // ensure python path still exists
     if (std::filesystem::exists(PYTHON_EXEC)) {
-        cmd = fmt::format("{} - {}", PYTHON_EXEC, fmt::join(args, " "));
+        cmd = fmt::format("\"{}\" - {}", PYTHON_EXEC, fmt::join(args, " "));
     }
     else if (const char *path = std::getenv("TWIST_PYTHON_PATH"); path && std::filesystem::exists(path)) {
         // use a different one if specified
-        cmd = fmt::format("{} - {}", path, fmt::join(args, " "));
+        cmd = fmt::format("\"{}\" - {}", path, fmt::join(args, " "));
     }
     else {
         throw std::runtime_error(fmt::format("TWIST was compiled with {} as the python path which no longer exists. Set the 'TWIST_PYTHON_PATH' environment variable to a valid path to python or rebuild TWIST.", PYTHON_EXEC));

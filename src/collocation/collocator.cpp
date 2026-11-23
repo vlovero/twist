@@ -240,7 +240,7 @@ namespace TWIST
             ::deserialize(group, "diffusion_indices", diffusion_indices);
             ::deserialize(group, "diffusion_coeffs", diffusion_coeffs);
             ::deserialize(group, "ndiff", ndiff);
-            std::string lib_path{ fmt::format(".cache/models/lib/{}.so", model_name) };
+            std::string lib_path{ fmt::format(".cache/models/lib/{}{}", model_name, TWIST_LIB_EXT) };
             if (!std::filesystem::exists(lib_path)) {
                 fmt::println("{} model does not have a compiled library. Make sure to create it with `twist build <path to model spec>`", model_name);
                 exit(1);
@@ -295,7 +295,7 @@ namespace TWIST
             ::deserialize(group, "diffusion_indices", diffusion_indices);
             ::deserialize(group, "diffusion_coeffs", diffusion_coeffs);
             ::deserialize(group, "ndiff", ndiff);
-            std::string lib_path{ fmt::format(".cache/models/lib/{}.so", model_name) };
+            std::string lib_path{ fmt::format(".cache/models/lib/{}{}", model_name, TWIST_LIB_EXT) };
             if (!std::filesystem::exists(lib_path)) {
                 fmt::println("{} model does not have a compiled library. Make sure to create it with `twist build <path to model spec>`", model_name);
                 exit(1);

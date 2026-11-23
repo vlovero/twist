@@ -1,5 +1,12 @@
 #include <signal.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/ioctl.h>
+#endif
 
 #include "cli/colors.h"
 #include "collocator.h"
@@ -19,9 +26,19 @@ LocationBar::LocationBar(double a, double b) : m_a(a), m_b(b), m_pos(0)
     ptrdiff_t total, width;
     m_nwhite = 101;
     total = m_nwhite + 25 + 40;
+    ptrdiff_t term_cols = 80;
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        term_cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    }
+#else
     struct winsize w;
-    ioctl(fileno(stdout), TIOCGWINSZ, &w);
-    width = std::min<ptrdiff_t>(1024, w.ws_col);
+    if (ioctl(fileno(stdout), TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+        term_cols = w.ws_col;
+    }
+#endif
+    width = std::min<ptrdiff_t>(1024, term_cols);
     if (total > (width)) {
         m_nwhite -= total - width;
     }

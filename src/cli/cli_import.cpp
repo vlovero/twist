@@ -216,7 +216,7 @@ auto load_needed_data(const std::string &spec_path, const std::string &parameter
 
     // get name and libpath
     name = get_json_entry(doc, "name", false, is_missing);
-    lib_path = fmt::format(".cache/models/lib/{}.so", std::string_view{ name.get_c_str() });
+    lib_path = fmt::format(".cache/models/lib/{}{}", std::string_view{ name.get_c_str() }, TWIST_LIB_EXT);
     if (!std::filesystem::exists(lib_path)) {
         throw std::runtime_error(fmt::format("{} model does not have a compiled library. Make sure to create it with `twist build <path to model spec>`", std::string_view{ name.get_c_str() }));
     }

@@ -15,7 +15,6 @@
 #include <omp.h>
 #include <optional>
 #include <stdexcept>
-#include <unistd.h>
 
 void filter_eigenvalues(const std::string &filter, std::vector<int> &indices, const std::vector<double> alphar, const std::vector<double> &alphai, const std::vector<double> &beta)
 {

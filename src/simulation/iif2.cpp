@@ -2,7 +2,6 @@
 #include "shared.h"
 #include "thread_pool.h"
 #include <algorithm>
-#include <alloca.h>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -307,7 +306,8 @@ std::tuple<double *, double *, ptrdiff_t, double> rxdiff_simulate_iif2(func_t fu
     ProgressBar pbar(option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::PrefixText{ "[simulating] " }, option::ShowPercentage(true), option::ShowElapsedTime(true), option::ShowRemainingTime(true));
 
     ptrdiff_t i, j, peak_index;
-    bool *converged = (bool *)alloca(2 * sizeof(bool));
+    bool converged_buf[2];
+    bool *converged = converged_buf;
     double tn, tn1, h, norm_error, tmp, factor;
     double wave_speed;
     double first_time_point, first_space_point, second_time_point, second_space_point;

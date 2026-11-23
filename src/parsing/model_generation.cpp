@@ -1,4 +1,5 @@
 #include "cli/load.h"
+#include "libloader.h"
 #include <filesystem>
 #include <stdexcept>
 
@@ -499,12 +500,12 @@ void compile_model(const char *path, const char *compiler, const bool source_onl
     fclose(file);
 
     if (source_only) {
-        fmt::println("source file has been saved to {}\nIf manually compiling make sure to save it under .cache/models/lib/{}.so", cpp_file, name);
+        fmt::println("source file has been saved to {}\nIf manually compiling make sure to save it under .cache/models/lib/{}{}", cpp_file, name, TWIST_LIB_EXT);
         return;
     }
 
     // don't allow overwrites by default
-    if (std::filesystem::exists(fmt::format(".cache/models/lib/{}.so", name))) {
+    if (std::filesystem::exists(fmt::format(".cache/models/lib/{}{}", name, TWIST_LIB_EXT))) {
         fmt::print("A model with the name '{}' has already been built. Do you want to replace this model? (y/n) ", name);
         fflush(stdout);
         if (char proceed; (scanf(" %c", &proceed) != 1) || ((proceed != 'y') && (proceed != 'Y'))) {
@@ -512,7 +513,7 @@ void compile_model(const char *path, const char *compiler, const bool source_onl
         }
     }
     // compile code
-    cmd = fmt::format("{0} -std=c++20 -march=native -O3 .cache/models/src/{1}.cpp -shared -o .cache/models/lib/{1}.so", compiler, name);
+    cmd = fmt::format("{0} -std=c++20 -march=native -O3 -fPIC .cache/models/src/{1}.cpp -shared -o .cache/models/lib/{1}{2}", compiler, name, TWIST_LIB_EXT);
     fmt::println("running: {}", cmd);
     sys_code = system(cmd.c_str());
     if (sys_code != 0) {

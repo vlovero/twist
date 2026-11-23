@@ -31,7 +31,7 @@ static void load_local(const std::string &spec, const std::string &parameter, co
 
     node = entry_to_map("system", doc).size();
     name = get_json_entry(doc, "name", false, is_missing);
-    lib_path = fmt::format(".cache/models/lib/{}.so", name);
+    lib_path = fmt::format(".cache/models/lib/{}{}", name, TWIST_LIB_EXT);
     if (!std::filesystem::exists(lib_path)) {
         fmt::println("{} model does not have a compiled library. Make sure to create it with `twist build <path to model spec>`", name);
         exit(1);

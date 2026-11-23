@@ -1,8 +1,6 @@
 #ifndef TWIST_CONTINUATION_H
 #define TWIST_CONTINUATION_H
 
-#include <sys/ioctl.h>
-
 #include "collocator.h"
 #include "fmt/core.h"
 #include "shared.h"

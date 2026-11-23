@@ -7,7 +7,6 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 static int global_argc;
 static char **global_argv;

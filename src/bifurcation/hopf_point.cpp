@@ -1,9 +1,9 @@
 #include "bif_points/hopf_point.h"
 #include "collocator.h"
 #include "colmat/tcolmat.h"
+#include "libloader.h"
 #include "shared.h"
 #include <cstddef>
-#include <dlfcn.h>
 
 namespace Hopf
 {

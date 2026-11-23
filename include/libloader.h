@@ -1,5 +1,11 @@
 #pragma once
 
+#ifdef _WIN32
+inline constexpr const char *TWIST_LIB_EXT = ".dll";
+#else
+inline constexpr const char *TWIST_LIB_EXT = ".so";
+#endif
+
 #if __has_include(<dlfcn.h>)
 #include <dlfcn.h>
 #else
