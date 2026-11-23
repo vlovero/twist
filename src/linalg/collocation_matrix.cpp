@@ -595,7 +595,7 @@ namespace sparse
         }
 
         m_partitions = (ColMatPartition *)malloc(m_nblocks * sizeof(ColMatPartition));
-        memset(m_partitions, 0, m_nblocks * sizeof(ColMatPartition));
+        memset((void *)m_partitions, 0, m_nblocks * sizeof(ColMatPartition));
         for (i = 0; i < m_nblocks; i++) {
             m_partitions[i].update(m_mat, i, ncol, node, nparam);
             // m_partitions[i] = std::move(ColMatPartition(m_mat, i, ncol, node, nparam));
@@ -639,7 +639,7 @@ namespace sparse
             new_cap = ngrid - 1;
             m_partitions = (ColMatPartition *)realloc(m_partitions, new_cap * sizeof(ColMatPartition));
             for (i = m_cap; i < new_cap; i++) {
-                memset(&m_partitions[i], 0, sizeof(ColMatPartition));
+                memset((void *)&m_partitions[i], 0, sizeof(ColMatPartition));
                 m_partitions[i].update(m_mat, i, ncol, node, nparam);
             }
             for (i = 0; i < m_cap; i++) {
