@@ -27,6 +27,7 @@ endif()
 # ####################################################################################
 option(TWIST_SANITIZE OFF)
 option(TWIST_THREAD_SANITIZE OFF)
+option(TWIST_PROFILING OFF)
 option(BUILD_BENCHMARKS OFF)
 option(BUILD_TESTS OFF)
 option(WITH_WAVE_NUMBER OFF)
@@ -80,9 +81,11 @@ set(static_libs
     ${CMAKE_SOURCE_DIR}/build/lib/libsymengine.a
     ${CMAKE_SOURCE_DIR}/build/lib/libumfpack.a
     ${CMAKE_SOURCE_DIR}/build/lib/libfftw3.a
-    ${CMAKE_SOURCE_DIR}/build/lib/libcaliper.a
     ${CMAKE_SOURCE_DIR}/build/lib/libxtgevc3.a
 )
+if(TWIST_PROFILING)
+    list(APPEND static_libs ${CMAKE_SOURCE_DIR}/build/lib/libcaliper.a)
+endif()
 if((UNIX AND NOT APPLE) OR MINGW)
     set(TWIST_STATIC_LIBS "$<LINK_GROUP:RESCAN,${static_libs}>")
 else()
@@ -125,6 +128,10 @@ endif()
 
 if (USE_BETTER_AUX)
     target_compile_definitions(_twistlib PUBLIC USE_BETTER_AUX)
+endif()
+
+if(TWIST_PROFILING)
+    target_compile_definitions(_twistlib PUBLIC TWIST_PROFILING)
 endif()
 
 # libs/includes for twist lib

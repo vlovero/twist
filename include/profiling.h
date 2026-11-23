@@ -1,6 +1,6 @@
 #pragma once
 
-#ifndef NDEBUG
+#ifdef TWIST_PROFILING
 #include "caliper/cali.h"
 
 #ifdef _MSC_VER

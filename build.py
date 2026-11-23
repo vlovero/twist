@@ -30,7 +30,6 @@ ALL_GIT_REPOS = (
     ("Tessil/ordered-map", "v1.1.0"),
     ("p-ranav/indicators", "v2.3"),
     ("Neargye/magic_enum", "v0.9.6"),
-    ("LLNL/Caliper", None),
     ("google/benchmark", "v1.9.4"),
 )
 GMP_URL = "https://gmplib.org/download/gmp/gmp-6.3.0.tar.gz"
@@ -55,7 +54,7 @@ ALL_CMAKE_BUILDS = {
     "xtgevc3": "-Dfmt_DIR={PREFIX}/lib/cmake/fmt -Dbenchmark_DIR={PREFIX}/lib/cmake/benchmark -DBLA_STATIC=ON -DLAPACK_LIBRARIES={PREFIX}/lib/libopenblas.a -DBLAS_LIBRARIES={PREFIX}/lib/libopenblas.a -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} ..",
 }
 
-TWIST_CMAKE_ARGS = "-DCMAKE_BUILD_TYPE={BUILD_TYPE} -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} -DPYTHON_EXEC={PYTHON_EXEC} -DBUILD_BENCHMARKS={BUILD_BENCHMARKS} -DTWIST_SANITIZE={TWIST_SANITIZE} -DWITH_WAVE_NUMBER={WITH_WAVE_NUMBER} -DCMAKE_POLICY_VERSION_MINIMUM=4.0 -DBUILD_TESTS={BUILD_TESTS} -DTWIST_GLOBAL_INSTALL={TWIST_GLOBAL_INSTALL} -DTWIST_THREAD_SANITIZE={TWIST_THREAD_SANITIZE} -DWITH_LOCAL_CONTINUATION={WITH_LOCAL_CONTINUATION} -DUSE_BETTER_AUX={USE_BETTER_AUX} ../.."
+TWIST_CMAKE_ARGS = "-DCMAKE_BUILD_TYPE={BUILD_TYPE} -DCMAKE_INSTALL_PREFIX:PATH={PREFIX} -DPYTHON_EXEC={PYTHON_EXEC} -DBUILD_BENCHMARKS={BUILD_BENCHMARKS} -DTWIST_SANITIZE={TWIST_SANITIZE} -DWITH_WAVE_NUMBER={WITH_WAVE_NUMBER} -DCMAKE_POLICY_VERSION_MINIMUM=4.0 -DBUILD_TESTS={BUILD_TESTS} -DTWIST_GLOBAL_INSTALL={TWIST_GLOBAL_INSTALL} -DTWIST_THREAD_SANITIZE={TWIST_THREAD_SANITIZE} -DTWIST_PROFILING={TWIST_PROFILING} -DWITH_LOCAL_CONTINUATION={WITH_LOCAL_CONTINUATION} -DUSE_BETTER_AUX={USE_BETTER_AUX} ../.."
 _BETTER_AUX_EXAMPLE = '''"auxillary": {
     "aux1": {
         "inputs": ["arg1", "arg2", "..."],
@@ -353,6 +352,7 @@ if __name__ == "__main__":
     BUILD_TESTS = CMAKE_ONOFF[args.with_tests]
     TWIST_SANITIZE = CMAKE_ONOFF[args.with_sanitizers]
     TWIST_THREAD_SANITIZE = CMAKE_ONOFF[args.with_thread_sanitizers]
+    TWIST_PROFILING = CMAKE_ONOFF[args.profiling]
     WITH_WAVE_NUMBER = CMAKE_ONOFF[args.with_wave_number]
     TWIST_GLOBAL_INSTALL = CMAKE_ONOFF[(not args.local_install) and (platform.system() != "Windows")]
     WITH_LOCAL_CONTINUATION = CMAKE_ONOFF[args.with_local_continuation]
@@ -401,6 +401,11 @@ if __name__ == "__main__":
         build_magic_enum(prefix.as_posix(), env, cache, args.verbose)
 
         for name, cmake_str in ALL_CMAKE_BUILDS.items():
+            if name == "Caliper":
+                if not args.profiling:
+                    continue
+                if not os.path.isdir("Caliper"):
+                    download_github_repo("LLNL/Caliper")
             cmake_args = cmake_str.format(PREFIX=prefix.as_posix()).split()
             build_cmake_dependency(name, env, cache, parallel_builds, args.verbose, cmake_args)
             cache.add(name)
@@ -422,6 +427,7 @@ if __name__ == "__main__":
                 TWIST_SANITIZE=TWIST_SANITIZE,
                 WITH_WAVE_NUMBER=WITH_WAVE_NUMBER,
                 TWIST_THREAD_SANITIZE=TWIST_THREAD_SANITIZE,
+                TWIST_PROFILING=TWIST_PROFILING,
                 WITH_LOCAL_CONTINUATION=WITH_LOCAL_CONTINUATION,
                 USE_BETTER_AUX=USE_BETTER_AUX
             ).split()
