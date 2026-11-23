@@ -4,7 +4,6 @@ import pathlib
 import shutil
 import platform
 import tarfile
-from time import sleep
 from glob import glob
 from argparse import ArgumentParser, RawTextHelpFormatter
 from subprocess import Popen, DEVNULL, check_output
@@ -32,9 +31,6 @@ ALL_GIT_REPOS = (
     ("Neargye/magic_enum", "v0.9.6"),
     ("google/benchmark", "v1.9.4"),
 )
-GMP_URL = "https://gmplib.org/download/gmp/gmp-6.3.0.tar.gz"
-ZLIB_URL = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
-FFTW_URL = "https://fftw.org/fftw-3.3.10.tar.gz"
 
 FFTW_SIMD_FLAGS = "-DENABLE_SSE=ON -DENABLE_SSE2=ON -DENABLE_AVX=ON -DENABLE_AVX2=ON " if platform.machine().lower() in ("x86_64", "amd64", "i386", "i686") else ""
 
@@ -107,16 +103,6 @@ def check_python_dependency(package, why, env, show_output):
             exit(1)
 
 
-def download_from_url(url, path):
-    requests = __import__("requests")
-
-    fname = os.path.basename(url)
-    with dir_as(path):
-        request = requests.get(url)
-        with open(fname, "wb") as file:
-            file.write(request.content)
-
-
 def download_all_repos():
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
         # do all git clones in parallel
@@ -124,26 +110,15 @@ def download_all_repos():
         for future in as_completed(futures):
             print(f"finished downloading {futures[future]}")
 
-        # do zip file downloads in parallel next
-        futures = {
-            pool.submit(download_from_url, GMP_URL, "."): GMP_URL,
-            pool.submit(download_from_url, ZLIB_URL, "."): ZLIB_URL,
-            pool.submit(download_from_url, FFTW_URL, "."): FFTW_URL,
-        }
-        for future in as_completed(futures):
-            print(f"finished downloading {futures[future]}")
+    external_dir = pathlib.Path(__file__).resolve().parent / "external"
+    shutil.copy2(external_dir / "zlib-1.3.1.tar.gz", "hdf5/zlib-1.3.1.tar.gz")
 
-    # add sleep here becuase python processes can sometimes
-    # finish before OS has registered downloaded file
-    sleep(1e-2)
-    
-    shutil.move("zlib-1.3.1.tar.gz", "hdf5/zlib-1.3.1.tar.gz")
     # unzip gmp and fftw
     unzip_kwargs = {} if sys.version_info.minor < 12 else dict(filter=None)
-    with tarfile.open("gmp-6.3.0.tar.gz", mode="r|gz") as file:
+    with tarfile.open(external_dir / "gmp-6.3.0.tar.gz", mode="r|gz") as file:
         file.extractall(**unzip_kwargs)
 
-    with tarfile.open("fftw-3.3.10.tar.gz", mode="r|gz") as file:
+    with tarfile.open(external_dir / "fftw-3.3.10.tar.gz", mode="r|gz") as file:
         file.extractall(**unzip_kwargs)
     shutil.move("fftw-3.3.10", "fftw")
 
@@ -196,7 +171,6 @@ def run_base_checks(env, show_output):
         log_status(cmd, built=False)
 
     # check for python packages that are needed for plotting
-    check_python_dependency("requests", "downloading dependencies", env, False)
     check_python_dependency("matplotlib", "visualize command", env, False)
     check_python_dependency("h5py", "visualize command", env, False)
 
