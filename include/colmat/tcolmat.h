@@ -820,6 +820,50 @@ namespace DEV
                 }
             }
 
+            void updateFromFjacs(const double *fjacs_rowmajor, const ptrdiff_t node, const ptrdiff_t ncol, const double h)
+            {
+                ptrdiff_t i, j, k, l;
+                const ptrdiff_t node2 = node * node;
+                const _method_t &method = GL_methods[ncol];
+                const double *A_rk = std::get<1>(method);
+                const double *b_rk = std::get<2>(method);
+
+                emptyPartition(ncol, node, 0);
+
+                for (i = 0; i < ncol; i++) {
+                    const double *jac_i = &fjacs_rowmajor[i * node2];
+                    data_t *Aview = &A[(i + 1) * node * bsize];
+                    const double scale = h * b_rk[i];
+                    for (j = 0; j < node; j++) {
+                        for (k = 0; k < node; k++) {
+                            Aview[j * bsize + k] = scale * jac_i[k * node + j];
+                        }
+                    }
+                }
+                for (i = 0; i < ncol; i++) {
+                    const double *jac_i = &fjacs_rowmajor[i * node2];
+                    for (j = 0; j < ncol; j++) {
+                        const double delta_ij = (i == j) ? 1.0 : 0.0;
+                        const double scale = h * A_rk[j * ncol + i];
+                        data_t *Aview = &A[((i + 1) * node) * bsize + ((j + 1) * node)];
+                        for (k = 0; k < node; k++) {
+                            for (l = 0; l < node; l++) {
+                                const double delta_kl = (k == l) ? 1.0 : 0.0;
+                                Aview[k * bsize + l] = scale * jac_i[l * node + k] - delta_ij * delta_kl;
+                            }
+                        }
+                    }
+                }
+                for (i = 0; i < node; i++) {
+                    for (j = 0; j < (ncol + 1); j++) {
+                        A[i * bsize + (j * node + i)] = 1.0;
+                    }
+                }
+                for (i = 0; i < node; i++) {
+                    A[(i + bsize) * bsize + i] = -1.0;
+                }
+            }
+
             // update routines from parents
             void update(const Partition<data_t> *partition1, const Partition<data_t> *partition2, const data_t *prow)
             {
@@ -1817,6 +1861,57 @@ namespace DEV
                 }
 
                 // factored = false;
+                m_info.clearFactored();
+            }
+
+            void updateFromFjacs(const double *fjacs_rowmajor, const ptrdiff_t ngrid, const ptrdiff_t node, const ptrdiff_t ncol, const double L, const double *h, BoundaryConditionsBlocks<data_t> *bc, bool keep_mm = false)
+            {
+                ptrdiff_t i;
+                const ptrdiff_t nblocks = ngrid - 1;
+                const ptrdiff_t block_fjac_stride = ncol * node * node;
+
+                if (!keep_mm && m_partitions_mm != nullptr) {
+                    for (i = 0; i < m_mm_cap; i++) {
+                        (m_partitions_mm + i)->~Partition();
+                    }
+                    free(m_partitions_mm);
+                    m_partitions_mm = nullptr;
+                    m_mm_cap = 0;
+                }
+
+                if ((nblocks != m_nblocks) || (m_partitions == nullptr) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (0 != m_partitions->nparam) || (keep_mm && m_partitions_mm == nullptr)) {
+                    if (m_cap < nblocks) {
+                        m_partitions = (Partition<data_t> *)realloc(m_partitions, nblocks * sizeof(Partition<data_t>));
+                        for (i = m_cap; i < nblocks; i++) {
+                            m_partitions[i] = std::move(Partition<data_t>());
+                        }
+                        m_cap = nblocks;
+                    }
+                    if (keep_mm && m_mm_cap < nblocks) {
+                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
+                        for (i = m_mm_cap; i < nblocks; i++) {
+                            m_partitions_mm[i] = std::move(Partition<data_t>());
+                        }
+                        m_mm_cap = nblocks;
+                    }
+                    m_nblocks = nblocks;
+                    for (i = 0; i < nblocks; i++) {
+                        m_partitions[i].emptyPartition(ncol, node, 0);
+                        if (keep_mm) {
+                            m_partitions_mm[i].emptyPartition(ncol, node, 0);
+                        }
+                    }
+                    resizeWork();
+                }
+
+                m_bc = bc;
+#pragma omp parallel for private(i) if (node > 5 && m_nblocks >= 64)
+                for (i = 0; i < m_nblocks; i++) {
+                    m_partitions[i].updateFromFjacs(&fjacs_rowmajor[i * block_fjac_stride], node, ncol, L * h[i]);
+                    if (keep_mm) {
+                        m_partitions_mm[i].fill(m_partitions[i]);
+                    }
+                }
                 m_info.clearFactored();
             }
 

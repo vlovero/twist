@@ -28,7 +28,10 @@ namespace TWIST
         // Solves A_n * dk_stages = rhs_stages where A_n = I x B - dtau_T * (A^R x A_{n,l}).
         // `rhs_stages` and `dk_stages` both have shape (n_space x st) in column-major (st contiguous slices of length n_space).
         // `dk_stages` may alias `rhs_stages`.
-        void solveLocalStages(const double *rhs_stages, double *dk_stages, bool exact_stage_jac = true) const;
+        void solveLocalStages(const double *rhs_stages, double *dk_stages, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
+
+        // Batched solve for K RHS columns (layout: st blocks of (n_space * K) column-major).
+        void solveLocalStagesBatch(size_t K, const double *rhs_stages, double *dk_stages, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
 
         // Evaluates out_stages = A_n * dy_stages using exact stage Jacobians (or avg Jacobian if !has_stage_jacs).
         void applyStageOperator(const double *dy_stages, double *out_stages) const;
@@ -36,11 +39,13 @@ namespace TWIST
         // Evaluates the condensed element propagator on slice M_n:
         //   w_out = [A_n^{-1} (1_{st} x B_{M_n} w_in)]_{st}
         // `w_in` and `w_out` have length n_space (on `m_slice`).
-        void applyElementPropagator(const RP(double) w_in, RP(double) w_out, bool exact_stage_jac = true) const;
+        void applyElementPropagator(const RP(double) w_in, RP(double) w_out, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
+        void applyElementPropagatorAllStages(const RP(double) w_in, RP(double) dk_stages_out, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
 
         // Evaluates condensed propagator from previous slice M_{n-1} to M_n:
         //   w_out = [A_n^{-1} (1_{st} x B_{M_n} P_{n-1 -> n} v_prev)]_{st}
-        void applyCondensedC(const RP(double) v_prev, const SparseDenseOutputOp &transfer_prev_to_cur, RP(double) w_out, bool exact_stage_jac = true) const;
+        void applyCondensedC(const RP(double) v_prev, const SparseDenseOutputOp &transfer_prev_to_cur, RP(double) w_out, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
+        void applyCondensedCAllStages(const RP(double) v_prev, const SparseDenseOutputOp &transfer_prev_to_cur, RP(double) dk_stages_out, bool exact_stage_jac = true, double local_rtol = 1e-12) const;
 
         // Assembles the explicit column-major condensed propagator matrix C_out (n_space x K)
         // where column j is applyCondensedC(e_j, transfer_prev_to_cur, col_j, true), using batched BLAS3 solves.
@@ -61,29 +66,36 @@ namespace TWIST
 
     private:
         void ensureWorkspace(size_t n_space, size_t st);
+        void ensureBatchWorkspace(size_t K_batch, size_t n_space, size_t st, size_t extra_doubles = 0) const;
         void applyPrecondOnly(const double *rhs_stages, double *dk_stages) const;
+        void applyPrecondOnlyFromBhat(const double *b_hat, double *dk_stages) const;
         void applyPrecondOnlyBatch(size_t K, const double *rhs_stages, double *dk_stages, double *batch_work, complex_t *cbatch_work) const;
+        void applyDeltaStageOp(const double *in_stages, double *out_stages) const;
+        void applyDeltaStageOpBatch(size_t K, const double *in_stages, double *out_stages, double *w_buf) const;
         void applyStageOperatorBatch(size_t K, const double *dy_stages, double *out_stages, double *ay_buf, double *mass_work) const;
 
         const SpatialSlice *m_slice = nullptr;
         size_t m_st = 0;
         size_t m_n_space = 0;
+        size_t m_bc_node = 0;
         double m_dtau_T = 1.0;
         bool m_has_stage_jacs = false;
+        double m_max_delta_fjac = 0.0;
 
         DEV::BoundaryConditions m_real_bc;
         DEV::ComplexBoundaryConditions m_complex_bc;
 
         DEV::Matrix m_avg_jac;
-        DEV::Matrix *m_stage_jacs = nullptr;
-        size_t m_stage_jacs_cap = 0;
+        double *m_avg_fjac = nullptr;
+        size_t m_avg_fjac_cap = 0;
+        double *m_delta_fjac = nullptr;
+        size_t m_delta_fjac_cap = 0;
 
         mutable DEV::Matrix m_real_mats[2];
         mutable DEV::ComplexMatrix m_complex_mats[2];
 
         // Pre-allocated scratch buffers (mutable for const solve/apply methods)
         mutable double *m_y_avg = nullptr;
-        mutable double *m_p_in = nullptr;     // st x st: T_s^(-1) * A_inv (row-major)
         mutable double *m_work = nullptr;     // general real scratch
         mutable complex_t *m_cwork = nullptr; // complex solve scratch
         size_t m_work_cap = 0;
@@ -92,6 +104,12 @@ namespace TWIST
         size_t m_pjac_work_cap = 0;
         mutable double *m_gmres_work = nullptr;
         mutable size_t m_gmres_work_cap = 0;
+        mutable double *m_cmat_buf = nullptr;
+        mutable size_t m_cmat_cap = 0;
+        mutable complex_t *m_cmat_cbuf = nullptr;
+        mutable size_t m_cmat_ccap = 0;
+        mutable size_t *m_cmat_cols = nullptr;
+        mutable size_t m_cmat_cols_cap = 0;
         mutable size_t m_stat_richardson_sweeps = 0;
         mutable size_t m_stat_gmres_fallbacks = 0;
     };

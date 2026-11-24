@@ -720,6 +720,103 @@ namespace
             CHECK(rel_err < 1e-14);
         }
     }
+
+    void verify_factored_delta_j_condenser()
+    {
+        const size_t node = 3;
+        const size_t ncol = 8;
+        const size_t nnodes = 15;
+        const size_t st = 3;
+        const double L0 = 2.0;
+        const double p[4] = { 1.35, 0.25, 2.0, 0.85 };
+        const diffusion_t diff = { { 0, TEST_D } };
+
+        std::vector<double> t(nnodes), t2(nnodes + 4);
+        for (size_t i = 0; i < nnodes; i++) t[i] = (double)i / (double)(nnodes - 1);
+        for (size_t i = 0; i < nnodes + 4; i++) t2[i] = (double)i / (double)(nnodes + 3);
+
+        TWIST::SpatialSlice sl_prev, sl_cur;
+        sl_prev.init(ncol, node, nnodes, t.data(), test_func, test_fjac, test_pjac, diff, 2.0 * L0);
+        sl_cur.init(ncol, node, nnodes + 4, t2.data(), test_func, test_fjac, test_pjac, diff, 2.0 * L0);
+        sl_prev.updateMassMatrices(p[0], p[3]);
+        sl_cur.updateMassMatrices(p[0], p[3]);
+
+        TWIST::SparseDenseOutputOp tr_id, tr_nonid;
+        tr_id.build(sl_cur, sl_cur);
+        tr_nonid.build(sl_prev, sl_cur);
+
+        const size_t ns = sl_cur.n_space;
+        const size_t ns_prev = sl_prev.n_space;
+        std::vector<double> y_stages(st * ns);
+        for (size_t l = 0; l < st; l++) {
+            for (size_t i = 0; i < ns; i++) {
+                y_stages[l * ns + i] = 0.6 * std::sin(0.13 * (double)(i + 1) + 0.7 * (double)l);
+            }
+        }
+
+        TWIST::SubintervalCondenser cond;
+        const double dtau_T = 1.5;
+        cond.factor(&sl_cur, st, y_stages.data(), p, dtau_T, true);
+
+        // 1. Compare solveLocalStagesBatch(K=4) against individual solveLocalStages and check A_n * dk == rhs
+        constexpr size_t K = 4;
+        std::vector<double> rhs_batch(st * ns * K), dk_batch(st * ns * K);
+        for (size_t c = 0; c < K; c++) {
+            for (size_t l = 0; l < st; l++) {
+                for (size_t i = 0; i < ns; i++) {
+                    rhs_batch[(l * K + c) * ns + i] = std::cos(0.19 * (double)(i + 1) + 0.5 * (double)(c + l));
+                }
+            }
+        }
+        cond.solveLocalStagesBatch(K, rhs_batch.data(), dk_batch.data(), true, 1e-12);
+
+        double max_batch_err = 0.0, max_res_err = 0.0;
+        std::vector<double> rhs_1(st * ns), dk_1(st * ns), op_out(st * ns);
+        for (size_t c = 0; c < K; c++) {
+            for (size_t l = 0; l < st; l++) {
+                memcpy(&rhs_1[l * ns], &rhs_batch[(l * K + c) * ns], ns * sizeof(double));
+            }
+            cond.solveLocalStages(rhs_1.data(), dk_1.data(), true, 1e-12);
+            cond.applyStageOperator(dk_1.data(), op_out.data());
+            for (size_t l = 0; l < st; l++) {
+                for (size_t i = 0; i < ns; i++) {
+                    max_batch_err = std::max(max_batch_err, std::abs(dk_batch[(l * K + c) * ns + i] - dk_1[l * ns + i]));
+                    max_res_err = std::max(max_res_err, std::abs(op_out[l * ns + i] - rhs_1[l * ns + i]));
+                }
+            }
+        }
+        fmt::println("[Test 7a] batch_err={:.3e}, res_err={:.3e}", max_batch_err, max_res_err);
+        CHECK(max_batch_err < 1e-10);
+        CHECK(max_res_err < 1e-10);
+
+        // 2. Compare computeCondensedMatrix (both identity and non-identity) vs applyCondensedC
+        std::vector<double> C_id(ns * ns), C_nonid(ns * ns_prev);
+        cond.computeCondensedMatrix(tr_id, C_id.data());
+        cond.computeCondensedMatrix(tr_nonid, C_nonid.data());
+
+        double max_cid_err = 0.0, max_cnonid_err = 0.0;
+        std::vector<double> e_id(ns, 0.0), e_prev(ns_prev, 0.0), col_ref(ns);
+        for (size_t j = 0; j < ns; j += 7) {
+            e_id[j] = 1.0;
+            cond.applyCondensedC(e_id.data(), tr_id, col_ref.data(), true, 1e-12);
+            e_id[j] = 0.0;
+            for (size_t i = 0; i < ns; i++) {
+                max_cid_err = std::max(max_cid_err, std::abs(C_id[j * ns + i] - col_ref[i]));
+            }
+        }
+        for (size_t j = 0; j < ns_prev; j += 7) {
+            e_prev[j] = 1.0;
+            cond.applyCondensedC(e_prev.data(), tr_nonid, col_ref.data(), true, 1e-12);
+            e_prev[j] = 0.0;
+            for (size_t i = 0; i < ns; i++) {
+                max_cnonid_err = std::max(max_cnonid_err, std::abs(C_nonid[j * ns + i] - col_ref[i]));
+            }
+        }
+        fmt::println("[Test 7] factored DeltaJ condenser: batch={:.3e}, res={:.3e}, C_id err={:.3e}, C_nonid err={:.3e}",
+            max_batch_err, max_res_err, max_cid_err, max_cnonid_err);
+        CHECK(max_cid_err < 1e-12);
+        CHECK(max_cnonid_err < 1e-12);
+    }
 } // namespace
 
 int main()
@@ -728,6 +825,7 @@ int main()
     verify_dg_convergence_and_precond();
     verify_tcolmat_nparam0_accuracy();
     verify_sparse_mass_ops();
+    verify_factored_delta_j_condenser();
     fmt::println("ALL test_spacetime_dae CHECKS PASSED!");
     return 0;
 }

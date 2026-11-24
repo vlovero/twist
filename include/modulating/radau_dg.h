@@ -22,6 +22,8 @@ namespace TWIST
         const double *D_tau;        // st x (st + 1), row-major temporal derivative matrix at c_l from {0, c_1, ..., c_st}
         const double *err_weights;  // length st + 1, divided-difference weights for leading degree-st term
         double leading_err_scale;   // 1 / (st!) scale for temporal error monitor
+        const double *P_in;         // st x st, row-major T_s^(-1) * (A^R)^(-1)
+        const double *gamma_ones;   // length st, T_s^(-1) * (A^R)^(-1) * 1_{st}
     };
 
     const RadauDGMethod &getRadauDG(size_t st);
