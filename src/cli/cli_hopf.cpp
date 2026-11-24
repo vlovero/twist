@@ -131,34 +131,106 @@ int HopfArgs::run()
 
     TWIST::HopfBranchSolver solver;
     std::string param_name;
+    std::string target_h5_path;
+    std::string branch_name;
+    int source_idx = -1;
+    bool skip_initial_serialize = false;
     void *lib = nullptr;
 
     if (!resume.empty()) {
-        if (resume.size() > 2) {
-            fmt::println("--resume expects <hopf.h5> [index]");
+        if (resume.size() > 3) {
+            fmt::println("--resume expects <file.h5> [branch] [index]");
             return 1;
         }
         const std::string &resume_path = resume[0];
         verify_hdf5_file(resume_path);
         H5::H5File h5file(resume_path, H5F_ACC_RDWR);
-        const int nsol = get_number_of_solutions(h5file);
-        int idx = (resume.size() == 2) ? std::atoi(resume[1].c_str()) : (nsol - 1);
-        idx = ((idx % nsol) + nsol) % nsol;
 
-        H5::Group basic = h5file.openGroup("basic_info");
-        int pmask_file[2] = { 0, 1 };
-        size_t np_file = 0;
-        deserialize(basic, "pmask", pmask_file);
-        deserialize(basic, "np", np_file);
-        param_name = parameter ? parameter.value() : infer_parameter_name(params, pmask_file[1], np_file);
+        int ftype = TWIST::FileType::continuation;
+        if (h5file.nameExists("meta_data/file_type")) {
+            H5::Group meta = h5file.openGroup("meta_data");
+            deserialize(meta, "file_type", ftype);
+        }
 
-        solver.loadFromH5(h5file, idx);
-        solver.solveNewton(0.0, 1e-10, 1e-4, 10, verbose);
-        solver.computeTangent();
-        solver.acceptStep();
-        // Set serialization to append onto a new tag (or continue in new file)
-        fmt::println("Resumed modulating wave from '{}' index {} ({} = {:.6e}, T = {:.6f})",
-            resume_path, idx, param_name, solver.continuationParam(), solver.period());
+        if (ftype == TWIST::FileType::hopf_continuation) {
+            if (resume.size() > 2) {
+                fmt::println("--resume on a standalone hopf file expects <hopf.h5> [index]");
+                return 1;
+            }
+            const int nsol = get_number_of_solutions(h5file);
+            int idx = (resume.size() == 2) ? std::atoi(resume[1].c_str()) : (nsol - 1);
+            idx = ((idx % nsol) + nsol) % nsol;
+
+            H5::Group basic = h5file.openGroup("basic_info");
+            int pmask_file[2] = { 0, 1 };
+            size_t np_file = 0;
+            deserialize(basic, "pmask", pmask_file);
+            deserialize(basic, "np", np_file);
+            param_name = parameter ? parameter.value() : infer_parameter_name(params, pmask_file[1], np_file);
+
+            solver.loadFromH5(h5file, idx);
+            solver.setSerializationTarget(h5file, "", nsol);
+            skip_initial_serialize = true;
+            solver.solveNewton(0.0, 1e-10, 1e-4, 10, verbose);
+            solver.computeTangent();
+            solver.acceptStep();
+            fmt::println("Resumed modulating wave from '{}' index {} ({} = {:.6e}, T = {:.6f})",
+                resume_path, idx, param_name, solver.continuationParam(), solver.period());
+        }
+        else {
+            std::vector<std::string> branches = get_hopf_branch_names(h5file);
+            if (branches.empty()) {
+                fmt::println(COLOR_RED "No Hopf branches found in '{}' under /hopf_branches." COLOR_RESET, resume_path);
+                return 1;
+            }
+            if (resume.size() == 1) {
+                if (branches.size() > 1) {
+                    fmt::println("Multiple Hopf branches found in '{}'. Re-run with `--resume {} <branch> [index]`:", resume_path, resume_path);
+                    for (const std::string &b : branches) {
+                        H5::Group bg = h5file.openGroup(fmt::format("hopf_branches/{}", b));
+                        fmt::println("  {} ({} solutions)", b, get_number_of_solutions(bg));
+                    }
+                    return 1;
+                }
+                branch_name = branches[0];
+            }
+            else {
+                const std::string &arg_b = resume[1];
+                if (std::find(branches.begin(), branches.end(), arg_b) != branches.end()) {
+                    branch_name = arg_b;
+                }
+                else if (std::find(branches.begin(), branches.end(), fmt::format("from_{}", arg_b)) != branches.end()) {
+                    branch_name = fmt::format("from_{}", arg_b);
+                }
+                else {
+                    fmt::println(COLOR_RED "Hopf branch '{}' not found in '{}'." COLOR_RESET, arg_b, resume_path);
+                    return 1;
+                }
+            }
+
+            const std::string branch_path = fmt::format("hopf_branches/{}", branch_name);
+            H5::Group bg = h5file.openGroup(branch_path);
+            const int nsol = get_number_of_solutions(bg);
+            int idx = (resume.size() == 3) ? std::atoi(resume[2].c_str()) : (nsol - 1);
+            idx = ((idx % nsol) + nsol) % nsol;
+
+            H5::Group basic = bg.openGroup("basic_info");
+            int pmask_file[2] = { 0, 1 };
+            size_t np_file = 0;
+            deserialize(basic, "pmask", pmask_file);
+            deserialize(basic, "np", np_file);
+            param_name = parameter ? parameter.value() : infer_parameter_name(params, pmask_file[1], np_file);
+
+            solver.loadFromH5(bg, idx);
+            solver.setSerializationTarget(h5file, branch_path, nsol);
+            skip_initial_serialize = true;
+            target_h5_path = resume_path;
+            solver.solveNewton(0.0, 1e-10, 1e-4, 10, verbose);
+            solver.computeTangent();
+            solver.acceptStep();
+            fmt::println("Resumed modulating wave from '{}:/{}' index {} ({} = {:.6e}, T = {:.6f})",
+                resume_path, branch_path, idx, param_name, solver.continuationParam(), solver.period());
+        }
     }
     else {
         if (from_data.size() > 2) {
@@ -276,6 +348,10 @@ int HopfArgs::run()
 
         solver.initFromHopfPoint(col, omega, psi.data(), (size_t)nt, (size_t)ncol_time, parnum);
         col.clearLibHandle();
+
+        target_h5_path = h5_path;
+        source_idx = sol_idx;
+        branch_name = (tag == "latest") ? fmt::format("from_{}", sol_idx) : fmt::format("from_{}_{}", sol_idx, tag);
     }
 
     TWIST::HopfContinuationBounds bounds;
@@ -291,7 +367,7 @@ int HopfArgs::run()
     bounds.max_nt_adapt = (size_t)max_nt;
     bounds.allow_mesh_adaptation = !no_adapt;
 
-    hopf_continuation_work_loop(solver, bounds, name, parameter_set, param_name, tag, prefix, verbose, max_steps);
+    hopf_continuation_work_loop(solver, bounds, name, parameter_set, param_name, tag, prefix, verbose, max_steps, target_h5_path, branch_name, source_idx, skip_initial_serialize);
     if (lib) {
         dlclose(lib);
     }

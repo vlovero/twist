@@ -13,7 +13,7 @@ static void hopf_sigint_handler(int)
     hopf_sigint_received = 1;
 }
 
-void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfContinuationBounds &bounds, const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, bool verbose, int max_steps)
+void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfContinuationBounds &bounds, const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, bool verbose, int max_steps, const std::string &target_h5_path, const std::string &branch_name, int source_index, bool skip_initial_serialize)
 {
     signal(SIGINT, &hopf_sigint_handler);
     hopf_sigint_received = 0;
@@ -30,8 +30,10 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
 
     LocationBar pbar(parmin, parmax);
 
-    // Serialize initial point (step 0: Hopf point at A=0, or resumed point)
-    solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::torusPoint);
+    if (!skip_initial_serialize) {
+        // Serialize initial point (step 0: Hopf point at A=0)
+        solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::torusPoint, target_h5_path, branch_name, source_index);
+    }
 
     fmt::println("Starting modulating wave continuation at {} = {:.6e}, c = {:.6f}, T = {:.6f}", parameter, alpha0, solver.waveSpeed(), solver.period());
 
@@ -92,7 +94,7 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
         pbar.update(alpha, fmt::format(" | {}={: .5e} | A={:.3e} | T={:.5f} | c={:.5f} | {}x{} | ds={:.2e} |",
             parameter, alpha, amp, solver.period(), solver.waveSpeed(), solver.nt(), solver.maxSpatialNodes(), ds));
 
-        solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::regular);
+        solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::regular, target_h5_path, branch_name, source_index);
 
         // Check branch reconnection (A -> 0 after moving away from Hopf point)
         if (step > 3 && amp < 1e-8) {

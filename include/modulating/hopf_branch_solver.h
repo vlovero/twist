@@ -45,9 +45,10 @@ namespace TWIST
         // Hopf frequency `omega`, and complex eigenfunction `psi` (length col.NUnknowns()).
         void initFromHopfPoint(const Collocator &hopf_col, double omega, const complex_t *psi, size_t nt = 20, size_t ncol_time = 3, int parnum = -1);
 
-        // Loads step `solution_index` from an existing hopf_continuation HDF5 file (for --resume or postprocessing).
+        // Loads step `solution_index` from an existing hopf_continuation HDF5 file or branch group (for --resume or postprocessing).
         void loadFromH5(const std::string &h5_path, int solution_index);
         void loadFromH5(const H5::H5File &file, int solution_index);
+        void loadFromH5(const H5::Group &root, int solution_index);
 
         // Sets up continuation predictor step: z_curr = z_prev + ds * tangent, updates m_y_stages accordingly.
         void predict(double ds);
@@ -75,10 +76,11 @@ namespace TWIST
         // Computes Floquet spectrum at current converged state using FloquetAnalyzer.
         FloquetSpectrum computeFloquet(size_t neig = 12, size_t nsub = 24, double tol = 1e-10, bool verbose = false);
 
-        // Serializes current solution step to HDF5 (creates file on first call).
-        void serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix = ".cache/continuation_data", SolutionTypes stype = SolutionTypes::regular);
+        // Serializes current solution step to HDF5 (creates standalone file or unified /hopf_branches/<branch_name> group on first call).
+        void serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix = ".cache/continuation_data", SolutionTypes stype = SolutionTypes::regular, const std::string &target_h5_path = "", const std::string &branch_name = "", int source_index = -1);
 
         void setSerializationFileAndIndex(H5::H5File &file, int index);
+        void setSerializationTarget(H5::H5File &file, const std::string &branch_group_path, int index);
 
         // Accessors
         size_t nt() const { return m_nt; }
@@ -204,5 +206,7 @@ namespace TWIST
         // HDF5 serialization state
         int m_serialization_index = -1;
         H5::H5File m_serialization_file;
+        H5::Group m_serialization_root;
+        std::string m_serialization_branch;
     };
 } // namespace TWIST

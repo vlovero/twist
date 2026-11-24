@@ -6,7 +6,7 @@ struct HopfArgs : public argparse::Args
 {
     std::string &model = arg("model", "path to JSON spec file of the model");
     std::vector<std::string> &from_data = kwarg("from-data", "steady continuation HDF5 file and optional Hopf solution index: <file.h5> [index]").set_default(std::vector<std::string>{}).multi_argument();
-    std::vector<std::string> &resume = kwarg("resume", "resume from an existing hopf continuation HDF5 file: <hopf.h5> [index]").set_default(std::vector<std::string>{}).multi_argument();
+    std::vector<std::string> &resume = kwarg("resume", "resume an existing Hopf branch: <file.h5> [branch] [index]").set_default(std::vector<std::string>{}).multi_argument();
 
     std::string &parameter_set = kwarg("parameter-set", "which parameter set to use").set_default("default");
     std::optional<std::string> &parameter = kwarg("p,parameter", "continuation parameter name (auto-inferred from HDF5 pmask if omitted)");

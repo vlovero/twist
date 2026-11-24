@@ -119,6 +119,8 @@ namespace TWIST
         m_win_M = other.m_win_M;
         m_serialization_index = other.m_serialization_index;
         m_serialization_file = other.m_serialization_file;
+        m_serialization_root = other.m_serialization_root;
+        m_serialization_branch = other.m_serialization_branch;
 
         if (other.m_nt > 0) {
             std::vector<size_t> nn(other.m_nt);
@@ -1991,11 +1993,18 @@ namespace TWIST
 
     void HopfBranchSolver::setSerializationFileAndIndex(H5::H5File &file, int index)
     {
+        setSerializationTarget(file, "", index);
+    }
+
+    void HopfBranchSolver::setSerializationTarget(H5::H5File &file, const std::string &branch_group_path, int index)
+    {
         m_serialization_file = file;
+        m_serialization_branch = branch_group_path;
+        m_serialization_root = branch_group_path.empty() ? file.openGroup("/") : file.openGroup(branch_group_path);
         m_serialization_index = index;
     }
 
-    void HopfBranchSolver::serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, SolutionTypes stype)
+    void HopfBranchSolver::serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, SolutionTypes stype, const std::string &target_h5_path, const std::string &branch_name, int source_index)
     {
         if (m_serialization_index == -1) {
             m_serialization_index = 0;
@@ -2010,24 +2019,44 @@ namespace TWIST
                 diffusion_coeffs.emplace_back(coeff);
             }
 
-            if (!prefix.empty()) {
-                std::filesystem::create_directories(prefix);
+            if (!target_h5_path.empty()) {
+                m_serialization_file = H5::H5File(target_h5_path.c_str(), H5F_ACC_RDWR);
+                if (!m_serialization_file.nameExists("hopf_branches")) {
+                    m_serialization_file.createGroup("hopf_branches");
+                }
+                H5::Group hb = m_serialization_file.openGroup("hopf_branches");
+                const std::string use_branch = branch_name.empty() ? tag : branch_name;
+                if (hb.nameExists(use_branch)) {
+                    hb.unlink(use_branch);
+                }
+                m_serialization_root = hb.createGroup(use_branch);
+                m_serialization_branch = fmt::format("hopf_branches/{}", use_branch);
             }
-            std::filesystem::path p_prefix(prefix);
-            std::filesystem::path p_name(fmt::format("{}-{}-{}-{}-hopf.h5", name, parameter_set, parameter, tag));
-            std::filesystem::path p_fpath = p_prefix / p_name;
-            m_serialization_file = H5::H5File(p_fpath.c_str(), H5F_ACC_TRUNC);
+            else {
+                if (!prefix.empty()) {
+                    std::filesystem::create_directories(prefix);
+                }
+                std::filesystem::path p_prefix(prefix);
+                std::filesystem::path p_name(fmt::format("{}-{}-{}-{}-hopf.h5", name, parameter_set, parameter, tag));
+                std::filesystem::path p_fpath = p_prefix / p_name;
+                m_serialization_file = H5::H5File(p_fpath.c_str(), H5F_ACC_TRUNC);
+                m_serialization_root = m_serialization_file.openGroup("/");
+                m_serialization_branch.clear();
+            }
 
             {
-                H5::Group meta(m_serialization_file.createGroup("meta_data"));
+                H5::Group meta(m_serialization_root.createGroup("meta_data"));
                 const std::string program_argv{ get_program_argv() };
                 const std::string cwd = std::filesystem::current_path();
                 ::serialize<int>(meta, "file_type", (int)FileType::hopf_continuation);
                 ::serialize<char, 1>(meta, "directory", cwd.c_str(), { cwd.size() });
                 ::serialize<char, 1>(meta, "cmdline", program_argv.c_str(), { program_argv.size() });
+                if (source_index >= 0) {
+                    ::serialize<int>(meta, "source_index", source_index);
+                }
             }
             {
-                H5::Group basic(m_serialization_file.createGroup("basic_info"));
+                H5::Group basic(m_serialization_root.createGroup("basic_info"));
                 ::serialize<size_t>(basic, "node", m_node);
                 ::serialize<size_t>(basic, "np", m_np);
                 ::serialize<size_t>(basic, "nparam", 3);
@@ -2043,7 +2072,7 @@ namespace TWIST
             }
         }
 
-        H5::Group group = m_serialization_file.createGroup(fmt::format("{}", m_serialization_index));
+        H5::Group group = m_serialization_root.createGroup(fmt::format("{}", m_serialization_index));
         m_serialization_index++;
 
         const double amp = oscillationAmplitude();
@@ -2103,6 +2132,12 @@ namespace TWIST
 
     void HopfBranchSolver::loadFromH5(const H5::H5File &file, int solution_index)
     {
+        H5::Group root = file.openGroup("/");
+        loadFromH5(root, solution_index);
+    }
+
+    void HopfBranchSolver::loadFromH5(const H5::Group &root, int solution_index)
+    {
         freeBuffers();
 
         char *model_name = nullptr;
@@ -2112,7 +2147,7 @@ namespace TWIST
         double half_L = 0.0;
         size_t ncol_time = 3;
 
-        H5::Group basic = file.openGroup("basic_info");
+        H5::Group basic = root.openGroup("basic_info");
         ::deserialize(basic, "node", m_node);
         ::deserialize(basic, "np", m_np);
         ::deserialize(basic, "nstages", m_spatial_nstages);
@@ -2144,7 +2179,7 @@ namespace TWIST
         free(diffusion_indices);
         free(diffusion_coeffs);
 
-        H5::Group group = file.openGroup(fmt::format("{}", solution_index));
+        H5::Group group = root.openGroup(fmt::format("{}", solution_index));
         size_t nt_read = 0;
         ::deserialize(group, "nt", nt_read);
         ::deserialize(group, "p", m_p);
