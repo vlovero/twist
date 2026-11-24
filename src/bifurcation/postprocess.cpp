@@ -672,20 +672,37 @@ void locate_all_branch_points_inplace_new(const std::string &file)
     }
 }
 
-void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files)
+namespace {
+H5::Group open_hopf_target_group(H5::H5File &file, const std::string &branch_group_path)
+{
+    if (branch_group_path.empty()) {
+        return file.openGroup("/");
+    }
+    return file.openGroup(branch_group_path);
+}
+
+std::string format_target_label(const std::string &file, const std::string &branch_group_path)
+{
+    return branch_group_path.empty() ? file : fmt::format("{}:/{}", file, branch_group_path);
+}
+} // namespace
+
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std::string, std::string>> &targets)
 {
     using namespace indicators;
     ProgressBar pbar1{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::PrefixText{ "[floquet] " }, option::ShowPercentage(true), option::ShowElapsedTime(true) };
     ProgressBar pbar2{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::ShowPercentage(true), option::ShowElapsedTime(true), option::ShowRemainingTime(true) };
     MultiProgress<ProgressBar, 2> pbars(pbar1, pbar2);
 
-    std::vector<bool> compute_file(files.size(), true);
-    for (size_t i = 0; i < files.size(); i++) {
-        H5::H5File file(files[i], H5F_ACC_RDWR);
-        if (!file.nameExists("0/floquet")) {
+    std::vector<bool> compute_target(targets.size(), true);
+    for (size_t i = 0; i < targets.size(); i++) {
+        const auto &[file_path, branch_path] = targets[i];
+        H5::H5File file(file_path, H5F_ACC_RDWR);
+        H5::Group root = open_hopf_target_group(file, branch_path);
+        if (!root.nameExists("0/floquet")) {
             continue;
         }
-        fmt::println("The Floquet spectra have already been computed for the file '{}'", files[i]);
+        fmt::println("The Floquet spectra have already been computed for '{}'", format_target_label(file_path, branch_path));
         fflush(stdin);
         fmt::print("Recompute Floquet spectra? [y/n] ");
         fflush(stdout);
@@ -694,38 +711,41 @@ void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &
             return;
         }
         if (answer != 'y' && answer != 'Y') {
-            compute_file[i] = false;
+            compute_target[i] = false;
             continue;
         }
-        const int nsol = get_number_of_solutions(file);
+        const int nsol = get_number_of_solutions(root);
         for (int j = 0; j < nsol; j++) {
             const std::string path = fmt::format("{}/floquet", j);
-            if (file.nameExists(path)) {
-                file.unlink(path);
+            if (root.nameExists(path)) {
+                root.unlink(path);
             }
         }
     }
 
-    pbar1.set_option(option::MaxProgress{ files.size() });
-    for (size_t i = 0; i < files.size(); i++) {
-        pbar1.set_option(option::PostfixText{ fmt::format(" '{}'", files[i]) });
-        if (!compute_file[i]) {
+    pbar1.set_option(option::MaxProgress{ targets.size() });
+    for (size_t i = 0; i < targets.size(); i++) {
+        const auto &[file_path, branch_path] = targets[i];
+        const std::string label = format_target_label(file_path, branch_path);
+        pbar1.set_option(option::PostfixText{ fmt::format(" '{}'", label) });
+        if (!compute_target[i]) {
             pbars.set_progress<0lu>(i + 1);
             continue;
         }
 
-        H5::H5File file(files[i], H5F_ACC_RDWR);
-        const int nsol = get_number_of_solutions(file);
+        H5::H5File file(file_path, H5F_ACC_RDWR);
+        H5::Group root = open_hopf_target_group(file, branch_path);
+        const int nsol = get_number_of_solutions(root);
         pbar2.set_option(option::MaxProgress{ (size_t)nsol });
 
         for (int j = 0; j < nsol; j++) {
             pbar2.set_option(option::PrefixText{ fmt::format("[soln.{:4d}/{:4d}] ", j, nsol) });
 
             TWIST::HopfBranchSolver solver;
-            solver.loadFromH5(file, j);
+            solver.loadFromH5(root, j);
             TWIST::FloquetSpectrum spec = solver.computeFloquet(12, 24, 1e-10, false);
 
-            H5::Group sol_group = file.openGroup(fmt::format("{}", j));
+            H5::Group sol_group = root.openGroup(fmt::format("{}", j));
             H5::Group fl_group = sol_group.createGroup("floquet");
             serialize<double, 1>(fl_group, "mu_real", spec.mu_real.data(), { spec.mu_real.size() });
             serialize<double, 1>(fl_group, "mu_imag", spec.mu_imag.data(), { spec.mu_imag.size() });
@@ -740,37 +760,49 @@ void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &
     puts("");
 }
 
-void locate_all_floquet_bifurcations_inplace(const std::string &file)
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files)
+{
+    std::vector<std::pair<std::string, std::string>> targets;
+    targets.reserve(files.size());
+    for (const auto &file : files) {
+        targets.emplace_back(file, "");
+    }
+    evaluate_floquet_for_each_solution_inplace(targets);
+}
+
+void locate_all_floquet_bifurcations_inplace(const std::string &file, const std::string &branch_group_path)
 {
     H5::H5File h5file(file, H5F_ACC_RDWR);
-    const int nsol = get_number_of_solutions(h5file);
-    if (!h5file.nameExists("0/floquet")) {
-        fmt::println("skipping file '{0}' because no Floquet data was found\n"
-                     "make sure to run `twist postprocess {0} -s` before bifurcation detection",
-            file);
+    H5::Group root = open_hopf_target_group(h5file, branch_group_path);
+    const std::string label = format_target_label(file, branch_group_path);
+    const int nsol = get_number_of_solutions(root);
+    if (!root.nameExists("0/floquet")) {
+        fmt::println("skipping '{}' because no Floquet data was found\n"
+                     "make sure to run `twist postprocess {} -s` before bifurcation detection",
+            label, file);
         return;
     }
 
-    H5::Group basic = h5file.openGroup("basic_info");
+    H5::Group basic = root.openGroup("basic_info");
     int pmask[2] = { 0, 1 };
     deserialize(basic, "pmask", pmask);
 
     int prev_nu = 0;
     uint64_t st0 = 0;
     {
-        H5::Group s0 = h5file.openGroup("0");
+        H5::Group s0 = root.openGroup("0");
         if (s0.nameExists("stype")) {
             deserialize(s0, "stype", st0);
         }
-        H5::Group fg = h5file.openGroup("0/floquet");
+        H5::Group fg = root.openGroup("0/floquet");
         deserialize(fg, "n_unstable", prev_nu);
     }
 
     int count = 0;
     for (int k = 1; k < nsol; k++) {
-        H5::Group sol_cur = h5file.openGroup(fmt::format("{}", k));
+        H5::Group sol_cur = root.openGroup(fmt::format("{}", k));
         H5::Group fg_cur = sol_cur.openGroup("floquet");
-        H5::Group fg_prev = h5file.openGroup(fmt::format("{}/floquet", k - 1));
+        H5::Group fg_prev = root.openGroup(fmt::format("{}/floquet", k - 1));
 
         int cur_nu = 0;
         deserialize(fg_cur, "n_unstable", cur_nu);
@@ -825,7 +857,7 @@ void locate_all_floquet_bifurcations_inplace(const std::string &file)
 
             // Do not overwrite index 0 torusPoint; tag the crossing solution k (or k-1 if k-1 is closer and k-1 > 0)
             const int tag_idx = (k - 1 > 0 && std::abs(std::abs(mu_p) - 1.0) < std::abs(std::abs(mu_c) - 1.0)) ? (k - 1) : k;
-            H5::Group sol_tag = h5file.openGroup(fmt::format("{}", tag_idx));
+            H5::Group sol_tag = root.openGroup(fmt::format("{}", tag_idx));
             uint64_t existing_st = 0;
             deserialize(sol_tag, "stype", existing_st);
             if (existing_st == TWIST::SolutionTypes::regular) {
@@ -847,5 +879,5 @@ void locate_all_floquet_bifurcations_inplace(const std::string &file)
         }
         prev_nu = cur_nu;
     }
-    fmt::println("Detected {} secondary Floquet bifurcation(s) in '{}'", count, file);
+    fmt::println("Detected {} secondary Floquet bifurcation(s) in '{}'", count, label);
 }

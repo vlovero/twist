@@ -30,11 +30,15 @@ int PostprocessArgs::run()
         for (const auto &file_name : files) {
             H5::H5File file(file_name, H5F_ACC_RDONLY);
             fmt::println("There are {} solutions in '{}'", get_number_of_solutions(file), file_name);
+            for (const auto &bname : get_hopf_branch_names(file)) {
+                H5::Group bg = file.openGroup(fmt::format("hopf_branches/{}", bname));
+                fmt::println("  hopf branch '{}': {} solutions", bname, get_number_of_solutions(bg));
+            }
         }
     }
 
     std::vector<std::string> steady_files;
-    std::vector<std::string> hopf_files;
+    std::vector<std::pair<std::string, std::string>> hopf_targets;
     for (const auto &file_name : files) {
         H5::H5File f(file_name, H5F_ACC_RDONLY);
         int ftype = TWIST::FileType::continuation;
@@ -43,10 +47,13 @@ int PostprocessArgs::run()
             deserialize(meta, "file_type", ftype);
         }
         if (ftype == TWIST::FileType::hopf_continuation) {
-            hopf_files.push_back(file_name);
+            hopf_targets.emplace_back(file_name, "");
         }
         else {
             steady_files.push_back(file_name);
+            for (const auto &bname : get_hopf_branch_names(f)) {
+                hopf_targets.emplace_back(file_name, fmt::format("hopf_branches/{}", bname));
+            }
         }
     }
 
@@ -60,8 +67,8 @@ int PostprocessArgs::run()
                 evaluate_spectrum_for_each_solution_inplace_distributed(steady_files, strategy);
             }
         }
-        if (!hopf_files.empty()) {
-            evaluate_floquet_for_each_solution_inplace(hopf_files);
+        if (!hopf_targets.empty()) {
+            evaluate_floquet_for_each_solution_inplace(hopf_targets);
         }
     }
 
@@ -89,8 +96,8 @@ int PostprocessArgs::run()
                 continue;
             }
         }
-        for (const std::string &file : hopf_files) {
-            locate_all_floquet_bifurcations_inplace(file);
+        for (const auto &[file, branch_path] : hopf_targets) {
+            locate_all_floquet_bifurcations_inplace(file, branch_path);
         }
     }
 

@@ -21,8 +21,12 @@ NEIMARK_SACKER = 6
 FILETYPE_HOPF_CONTINUATION = 5
 
 
-def is_hopf_file(data: h5py.File):
+def is_hopf_file(data):
     return ("meta_data/file_type" in data) and (int(data["meta_data/file_type"][0]) == FILETYPE_HOPF_CONTINUATION)
+
+
+def count_solutions(group):
+    return sum(1 for key in group.keys() if key.isdigit())
 
 
 def get_floquet_multipliers(file, solution_id):
@@ -31,8 +35,8 @@ def get_floquet_multipliers(file, solution_id):
     return mr, mi
 
 
-def gen_hopf_apds(data: h5py.File, apd_value):
-    n = len(data) - 2
+def gen_hopf_apds(data, apd_value):
+    n = count_solutions(data)
     L0 = 2 * data["basic_info/spatial_period"][0]
     r = 1.0 - apd_value * 1e-2
     apds_mean = []
@@ -155,8 +159,8 @@ def print_rcparams():
             print(f"{key}: {value}")
     
 
-def gen_l2_norms(data: h5py.File):
-    n = len(data) - 2
+def gen_l2_norms(data):
+    n = count_solutions(data)
     ncol = int(data["basic_info/nstages"][0])
     node = int(data["basic_info/node"][0])
     L0 = 2 * data["basic_info/spatial_period"][0]
@@ -337,8 +341,8 @@ def compute_apd(v, vp, x, r, _index, _cs):
     return xdense[istop] - xdense[istart]
 
 
-def gen_apds(data: h5py.File, apd_value):
-    n = len(data) - 2
+def gen_apds(data, apd_value):
+    n = count_solutions(data)
     ncol = int(data["basic_info/nstages"][0])
     node = int(data["basic_info/node"][0])
     L0 = 2 * data["basic_info/spatial_period"][0]
@@ -373,7 +377,7 @@ class FileIndexPartition:
         partitions = []
         offset = 0
         for i, file in enumerate(h5_files):
-            nsols = len(file) - 2
+            nsols = count_solutions(file)
             partitions.append((offset + i, nsols + offset + i))
             offset += nsols
         self.partitions = partitions
@@ -416,9 +420,24 @@ class DispersionCurve:
         stability_legend=False,
     ):
         self.cpaths = np.array([continuation_data], dtype=object).ravel()
-        self.continuation_data = tuple(h5py.File(file) for file in self.cpaths)
+        self._open_files = tuple(h5py.File(file) for file in self.cpaths)
+        entries = []
+        entry_labels = []
+        for path, h5f in zip(self.cpaths, self._open_files):
+            if count_solutions(h5f) > 0:
+                entries.append(h5f)
+                entry_labels.append(path)
+            if "hopf_branches" in h5f:
+                hb_group = h5f["hopf_branches"]
+                for bname in sorted(hb_group.keys()):
+                    bgrp = hb_group[bname]
+                    if count_solutions(bgrp) > 0:
+                        entries.append(bgrp)
+                        entry_labels.append(f"{path}:/hopf_branches/{bname}")
+        self.continuation_data = tuple(entries)
+        self.entry_labels = tuple(entry_labels)
         self.fip = FileIndexPartition(self.continuation_data)
-        cmdline = "".join(map(chr, self.continuation_data[0]["meta_data/cmdline"][:]))
+        cmdline = "".join(map(chr, self._open_files[0]["meta_data/cmdline"][:]))
         self.profile_index = 0
         spec_path = None
         for tok in cmdline.split():
@@ -582,13 +601,14 @@ class DispersionCurve:
         if not self.dispersion_mode_colors:
             raise RuntimeError("need to specify color list")
         colors = self.dispersion_mode_colors[0].split(",")
-        if len(colors) < len(self.cpaths):
-            raise RuntimeError(f"need to specify at least {len(self.cpaths)} colors")
+        n_entries = len(self.continuation_data)
+        if len(colors) < n_entries:
+            raise RuntimeError(f"need to specify at least {n_entries} colors")
 
         points = np.c_[alpha, c].reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
         cmap = ListedColormap(colors)
-        N = max(2, len(self.cpaths))
+        N = max(2, n_entries)
         bounds = np.arange(N)
         bounds = np.insert(bounds.astype(float), bounds[1:], 0.5 * (bounds[:-1] + bounds[1:]))
         stability = [self.fip.index(i, False) for i in range(len(c))]
@@ -600,9 +620,9 @@ class DispersionCurve:
 
         if self.dispersion_labels is None:
             return
-        if len(self.dispersion_labels) != len(self.cpaths):
+        if len(self.dispersion_labels) not in (len(self.cpaths), n_entries):
             print(self.dispersion_labels)
-            raise RuntimeError(f"expected {len(self.dispersion_labels)} labels")
+            raise RuntimeError(f"expected {n_entries} labels")
 
         for i, label in enumerate(self.dispersion_labels):
             ax.plot([], [], color=cmap(float(i)), label=label)
@@ -614,7 +634,7 @@ class DispersionCurve:
         cmap = plt.get_cmap(self.dispersion_mode_colors[0])
         points = np.c_[alpha, c].reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
-        N = len(self.cpaths)
+        N = max(2, len(self.continuation_data))
         bounds = np.arange(N)
         bounds = np.insert(bounds.astype(float), bounds[1:], 0.5 * (bounds[:-1] + bounds[1:]))
         stability = [self.fip.index(i, False) for i in range(len(c))]
@@ -625,9 +645,9 @@ class DispersionCurve:
 
         if self.dispersion_labels is None:
             return
-        if len(self.dispersion_labels) != len(self.cpaths):
+        if len(self.dispersion_labels) not in (len(self.cpaths), len(self.continuation_data)):
             print(self.dispersion_labels)
-            raise RuntimeError(f"expected {len(self.dispersion_labels)} labels")
+            raise RuntimeError(f"expected {len(self.continuation_data)} labels")
 
         for i, label in enumerate(self.dispersion_labels):
             _color = i / max(1, len(self.dispersion_labels) - 1)
@@ -665,7 +685,7 @@ class DispersionCurve:
         stability_all = []
         solution_types = []
         for file in self.continuation_data:
-            nsolutions = len(file) - 2
+            nsolutions = count_solutions(file)
             pmask = file["basic_info/pmask"][...]
             hopf_mode = is_hopf_file(file)
 
@@ -738,7 +758,7 @@ class DispersionCurve:
         c = self.c = np.array(c_all)
         alpha = self.alpha = np.array(alpha_all)
         if (param == "sps") and self.actual_spatial_period:
-            self.alpha *= file["basic_info/spatial_period"][0] * 2
+            self.alpha *= self._open_files[0]["basic_info/spatial_period"][0] * 2
         c_min = c[np.isfinite(c)].min()
         c_max = c[np.isfinite(c)].max()
         alpha_min = alpha[np.isfinite(alpha)].min()
@@ -972,7 +992,7 @@ class DispersionCurve:
             file_index = self.fip.index(self.solution_index)
             index = self.solution_index - self.fip.partitions[file_index][0]
             print()
-            print(f"file                   : {self.cpaths[file_index]}")
+            print(f"file                   : {self.entry_labels[file_index]}")
             print(f"solution index         : {index}")
             print(f"parameter value        : {self.alpha[self.solution_index]}")
             if self.stability_data is not None:
