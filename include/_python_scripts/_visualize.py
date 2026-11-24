@@ -29,6 +29,21 @@ def count_solutions(group):
     return sum(1 for key in group.keys() if key.isdigit())
 
 
+def _sample_hopf_profile(kymo, tau_grid, tau_val):
+    tau_val = float(np.clip(tau_val, 0.0, 1.0))
+    if len(tau_grid) <= 1 or kymo.shape[0] <= 1:
+        return kymo[0]
+    idx_hi = int(np.searchsorted(tau_grid, tau_val, side="right"))
+    if idx_hi <= 0:
+        return kymo[0]
+    if idx_hi >= len(tau_grid):
+        return kymo[-1]
+    idx_lo = idx_hi - 1
+    dt = float(tau_grid[idx_hi] - tau_grid[idx_lo])
+    w = (tau_val - float(tau_grid[idx_lo])) / dt if dt > 0.0 else 0.0
+    return (1.0 - w) * kymo[idx_lo] + w * kymo[idx_hi]
+
+
 def get_floquet_multipliers(file, solution_id):
     mr = file[f"{solution_id}/mu_real"][...]
     mi = file[f"{solution_id}/mu_imag"][...]
@@ -466,33 +481,61 @@ class DispersionCurve:
 
         has_steady_spec = any("0/spectrum" in file for file in self.continuation_data)
         has_floquet = any("0/floquet" in file for file in self.continuation_data)
+        has_hopf = any(is_hopf_file(file) for file in self.continuation_data)
         if (not has_steady_spec and not has_floquet) or no_stability:
             self.stability_data = None
         else:
             self.stability_data = True
 
+        self.individual = individual
+        self.has_hopf = has_hopf
+        self._gs = None
+        self._layout_mode = None
+        self.kymo_ax = None
+
         if self.stability_data is None:
             if not individual:
-                fig, (self.ax1, self.ax2) = plt.subplots(num=fignum, figsize=(9, 6), layout="constrained", nrows=2)
-                self.figs = (fig,)
+                if has_hopf:
+                    fig = plt.figure(num=fignum, figsize=(12, 6), layout="constrained")
+                    self.figs = (fig,)
+                    self._gs = gridspec.GridSpec(2, 2, figure=fig)
+                    self.ax1 = fig.add_subplot(self._gs[0, :])
+                    self.ax2 = fig.add_subplot(self._gs[1, :])
+                    self.kymo_ax = fig.add_subplot(self._gs[0, 1])
+                    self.kymo_ax.set_visible(False)
+                    self.kymo_ax.set_in_layout(False)
+                else:
+                    fig, (self.ax1, self.ax2) = plt.subplots(num=fignum, figsize=(9, 6), layout="constrained", nrows=2)
+                    self.figs = (fig,)
             else:
                 fig1, self.ax1 = plt.subplots(layout="constrained")
                 fig2, self.ax2 = plt.subplots(layout="constrained")
-                self.figs = (fig1, fig2)
+                if has_hopf:
+                    fig_k, self.kymo_ax = plt.subplots(layout="constrained")
+                    self.figs = (fig1, fig2, fig_k)
+                else:
+                    self.figs = (fig1, fig2)
             self.spectrum_ax = None
         else:
             if not individual:
                 fig = plt.figure(figsize=(12, 6), layout="constrained")
                 self.figs = (fig,)
-                gs = gridspec.GridSpec(2, 2, figure=fig)
-                self.ax1 = fig.add_subplot(gs[0, 0])
-                self.ax2 = fig.add_subplot(gs[1, 0])
-                self.spectrum_ax = fig.add_subplot(gs[:, 1])
+                self._gs = gridspec.GridSpec(2, 2, figure=fig)
+                self.ax1 = fig.add_subplot(self._gs[0, 0])
+                self.ax2 = fig.add_subplot(self._gs[1, 0])
+                self.spectrum_ax = fig.add_subplot(self._gs[:, 1])
+                self.kymo_ax = fig.add_subplot(self._gs[0, 1])
+                self.kymo_ax.set_visible(False)
+                self.kymo_ax.set_in_layout(False)
             else:
                 fig1, self.ax1 = plt.subplots(layout="constrained")
                 fig2, self.ax2 = plt.subplots(layout="constrained")
                 fig3, self.spectrum_ax = plt.subplots(layout="constrained")
-                self.figs = (fig1, fig2, fig3)
+                if has_hopf:
+                    fig4, self.kymo_ax = plt.subplots(layout="constrained")
+                    self.figs = (fig1, fig2, fig3, fig4)
+                else:
+                    self.figs = (fig1, fig2, fig3)
 
         self.do_l2_norms = do_l2_norms
         self.do_apds = do_apds
@@ -500,6 +543,10 @@ class DispersionCurve:
         self.do_period = do_period
         self.apd_value = apd_value
         self.kymo_im = None
+        self.kymo_hline = None
+        self.hopf_tau = 0.5
+        self._dragging_kymo_line = False
+        self._current_hopf = None
         self.unit_circle_line = None
         self.spectrum_mode = None
         self.dispersion_mode, *self.dispersion_mode_colors = dispersion_mode.split(":")
@@ -560,12 +607,77 @@ class DispersionCurve:
             elif (index == 2) and (self.spectrum_ax is not None):
                 self.spectrum_ax.set_xlim(xlo, xhi)
                 self.spectrum_ax.set_ylim(ylo, yhi)
+            elif (index == 3) and (self.kymo_ax is not None):
+                self.kymo_ax.set_xlim(xlo, xhi)
+                self.kymo_ax.set_ylim(ylo, yhi)
+
+    def _apply_layout(self, hopf_mode: bool):
+        if self._layout_mode == hopf_mode:
+            return
+        self._layout_mode = hopf_mode
+        if self.individual:
+            return
+        if self._gs is None:
+            return
+        if self.stability_data is not None:
+            if hopf_mode:
+                self.ax1.set_subplotspec(self._gs[0, 0])
+                self.spectrum_ax.set_subplotspec(self._gs[1, 0])
+                self.kymo_ax.set_subplotspec(self._gs[0, 1])
+                self.ax2.set_subplotspec(self._gs[1, 1])
+                self.kymo_ax.set_in_layout(True)
+                self.kymo_ax.set_visible(True)
+            else:
+                self.kymo_ax.set_visible(False)
+                self.kymo_ax.set_in_layout(False)
+                self.ax1.set_subplotspec(self._gs[0, 0])
+                self.ax2.set_subplotspec(self._gs[1, 0])
+                self.spectrum_ax.set_subplotspec(self._gs[:, 1])
+        else:
+            if hopf_mode:
+                self.ax1.set_subplotspec(self._gs[0, 0])
+                self.kymo_ax.set_subplotspec(self._gs[0, 1])
+                self.ax2.set_subplotspec(self._gs[1, 1])
+                self.kymo_ax.set_in_layout(True)
+                self.kymo_ax.set_visible(True)
+            else:
+                self.kymo_ax.set_visible(False)
+                self.kymo_ax.set_in_layout(False)
+                self.ax1.set_subplotspec(self._gs[0, :])
+                self.ax2.set_subplotspec(self._gs[1, :])
+
+    def _update_hopf_profile(self, reset_lims=False):
+        if self._current_hopf is None:
+            return
+        kymo, tau_grid, x_grid, T_val = self._current_hopf
+        t_curr = self.hopf_tau * T_val
+        y_prof = _sample_hopf_profile(kymo, tau_grid, self.hopf_tau)
+        self.sol_line.set_data(x_grid, y_prof)
+        if self.kymo_hline is not None:
+            self.kymo_hline.set_ydata([t_curr, t_curr])
+        if reset_lims:
+            self.ax2.set_xlim(float(x_grid[0]), float(x_grid[-1]))
+            ymin = float(np.min(kymo))
+            ymax = float(np.max(kymo))
+            dy = ymax - ymin
+            pad = 0.05 * dy if dy > 0 else 0.05
+            self.ax2.set_ylim(ymin - pad, ymax + pad)
+        self.ax2.set_title(f"$t = {t_curr:.4f}$ ($\\tau = {self.hopf_tau:.3f}$)")
 
     def reset(self):
         self.ax1.cla()
         self.ax2.cla()
         if self.stability_data is not None:
             self.spectrum_ax.cla()
+        if self.kymo_ax is not None:
+            self.kymo_ax.cla()
+        self.kymo_im = None
+        self.kymo_hline = None
+        self.unit_circle_line = None
+        self.spectrum_mode = None
+        self._layout_mode = None
+        self._current_hopf = None
+        self.hopf_tau = 0.5
         self.all_plots.clear()
 
         self.initialized = False
@@ -841,7 +953,7 @@ class DispersionCurve:
         self.sol_dot.set_data(self.alpha[[index]], self.c[[index]])
 
         if hopf_mode:
-            self.sol_line.set_data([], [])
+            self._apply_layout(True)
             kymo = file[f"{sol_index}/kymograph"][:, :, self.profile_index]
             if self.transforms is not None:
                 for t_idx, shift, scale in self.transforms:
@@ -856,17 +968,40 @@ class DispersionCurve:
             A_val = float(file[f"{sol_index}/amplitude"][0])
             x_lo = -0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else 0.0
             x_end = 0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else x_hi
+            x_grid = np.linspace(x_lo, x_end, kymo.shape[1])
+            if f"{sol_index}/tau" in file:
+                tau_grid = file[f"{sol_index}/tau"][...]
+            else:
+                tau_grid = np.linspace(0.0, 1.0, kymo.shape[0])
+
+            kax = self.kymo_ax
             if self.kymo_im is None:
-                self.kymo_im = self.ax2.imshow(kymo, aspect="auto", origin="lower", extent=[x_lo, x_end, 0.0, T_val], cmap="viridis")
+                self.kymo_im = kax.imshow(kymo, aspect="auto", origin="lower", extent=[x_lo, x_end, 0.0, T_val], cmap="viridis")
             else:
                 self.kymo_im.set_visible(True)
                 self.kymo_im.set_data(kymo)
                 self.kymo_im.set_extent([x_lo, x_end, 0.0, T_val])
                 self.kymo_im.autoscale()
-            self.ax2.set_xlim(x_lo, x_end)
-            self.ax2.set_ylim(0.0, T_val)
-            self.ax2.set_ylabel(r"time $t$")
-            self.ax2.set_title(f"{self.names[self.profile_index]}  |  T={T_val:.4f}, c={c_val:.4f}, A={A_val:.3e}")
+            if self.kymo_hline is None:
+                self.kymo_hline = kax.axhline(self.hopf_tau * T_val, color="white", linestyle="--", linewidth=1.6, zorder=10)
+            else:
+                self.kymo_hline.set_visible(True)
+
+            kax.set_xlim(x_lo, x_end)
+            kax.set_ylim(0.0, T_val)
+            kax.set_xlabel(self.ax2.get_xlabel())
+            kax.set_ylabel(r"time $t$")
+            kax.set_title(f"{self.names[self.profile_index]}  |  T={T_val:.4f}, c={c_val:.4f}, A={A_val:.3e}")
+
+            for line in self.ax2.get_lines():
+                if line is not self.sol_line:
+                    line.set_visible(False)
+            self._current_hopf = (kymo, tau_grid, x_grid, T_val)
+            self._update_hopf_profile(reset_lims=True)
+            ylabel = self.names[self.profile_index]
+            if self.wave_profile_units is not None:
+                ylabel = f"{ylabel} ({self.wave_profile_units})"
+            self.ax2.set_ylabel(ylabel)
 
             if self.stability_data is not None:
                 if self.unit_circle_line is None:
@@ -893,8 +1028,14 @@ class DispersionCurve:
                 self.spectrum_ax.spines[["left", "bottom"]].set_position(("axes", 0.0))
                 self.spectrum_mode = "hopf"
         else:
+            self._apply_layout(False)
+            self._current_hopf = None
             if self.kymo_im is not None:
                 self.kymo_im.set_visible(False)
+            if self.kymo_hline is not None:
+                self.kymo_hline.set_visible(False)
+            for line in self.ax2.get_lines():
+                line.set_visible(True)
             self.ax2.set_title("")
             s = int(file["basic_info/nstages"][...][0])
             self.gauss = 0.5 * (np.polynomial.legendre.leggauss(s)[0] + 1)
@@ -1016,10 +1157,52 @@ class DispersionCurve:
         elif event.key.isdigit():
             self.digits_entered.append(event.key)
 
+    def _set_hopf_time_from_y(self, y_val):
+        if self._current_hopf is None:
+            return
+        T_val = self._current_hopf[3]
+        if T_val <= 0.0:
+            return
+        self.hopf_tau = float(np.clip(y_val / T_val, 0.0, 1.0))
+        self._update_hopf_profile(reset_lims=False)
+        if _RENDERING:
+            if self.kymo_ax is not None:
+                self.kymo_ax.figure.canvas.draw_idle()
+            self.ax2.figure.canvas.draw_idle()
+
+    def on_kymo_press(self, event):
+        if self.kymo_ax is None or self._current_hopf is None:
+            return
+        if event.inaxes is not self.kymo_ax or event.button != 1 or event.ydata is None:
+            return
+        toolbar = getattr(event.canvas, "toolbar", None)
+        if toolbar is not None and getattr(toolbar, "mode", ""):
+            return
+        self._dragging_kymo_line = True
+        self._set_hopf_time_from_y(event.ydata)
+
+    def on_kymo_motion(self, event):
+        if not self._dragging_kymo_line or self.kymo_ax is None or self._current_hopf is None:
+            return
+        if event.inaxes is self.kymo_ax and event.ydata is not None:
+            y_val = event.ydata
+        else:
+            _, y_val = self.kymo_ax.transData.inverted().transform((event.x, event.y))
+        self._set_hopf_time_from_y(y_val)
+
+    def on_kymo_release(self, event):
+        if event.button == 1:
+            self._dragging_kymo_line = False
+
     def _init_listeners(self):
         self.figs[0].canvas.mpl_connect("pick_event", self.on_pick)
         for fig in self.figs:
             fig.canvas.mpl_connect("key_press_event", self.on_press)
+        if self.kymo_ax is not None:
+            kfig = self.kymo_ax.figure
+            kfig.canvas.mpl_connect("button_press_event", self.on_kymo_press)
+            kfig.canvas.mpl_connect("motion_notify_event", self.on_kymo_motion)
+            kfig.canvas.mpl_connect("button_release_event", self.on_kymo_release)
 
 
 if __name__ == "__main__":
