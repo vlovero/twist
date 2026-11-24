@@ -8,6 +8,7 @@
 #include "profiling.h"
 #include "shared.h"
 #include "tools/helpers.h"
+#include <algorithm>
 #include <cstddef>
 #include <omp.h>
 #include <stdexcept>
@@ -67,6 +68,93 @@ namespace DEV
             if ((m == 0) || (n == 0)) {
                 return;
             }
+            const bool no_trans = (transa[0] == 'N' || transa[0] == 'n');
+            if (no_trans && ((omp_in_parallel() != 0) || (n == 1) || (m <= 16 && n <= 16))) {
+                const bool left = (side[0] == 'L' || side[0] == 'l');
+                const bool lower = (uplo[0] == 'L' || uplo[0] == 'l');
+                const bool unit = (diag[0] == 'U' || diag[0] == 'u');
+                if (alpha != data_t(1.0)) {
+                    for (int j = 0; j < n; j++) {
+                        RP(data_t) Bj = &B[(size_t)j * ldb];
+                        for (int i = 0; i < m; i++) {
+                            Bj[i] *= alpha;
+                        }
+                    }
+                }
+                if (left) {
+                    if (lower) {
+                        for (int j = 0; j < n; j++) {
+                            RP(data_t) Bj = &B[(size_t)j * ldb];
+                            for (int k = 0; k < m; k++) {
+                                const data_t xk = unit ? Bj[k] : (Bj[k] /= A[(size_t)k * lda + k]);
+                                if (xk != data_t(0.0)) {
+                                    const data_t *Ak = &A[(size_t)k * lda];
+                                    for (int i = k + 1; i < m; i++) {
+                                        Bj[i] -= Ak[i] * xk;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        for (int j = 0; j < n; j++) {
+                            RP(data_t) Bj = &B[(size_t)j * ldb];
+                            for (int k = m - 1; k >= 0; k--) {
+                                const data_t xk = unit ? Bj[k] : (Bj[k] /= A[(size_t)k * lda + k]);
+                                if (xk != data_t(0.0)) {
+                                    const data_t *Ak = &A[(size_t)k * lda];
+                                    for (int i = 0; i < k; i++) {
+                                        Bj[i] -= Ak[i] * xk;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                else {
+                    if (!lower) {
+                        for (int k = 0; k < n; k++) {
+                            RP(data_t) Bk = &B[(size_t)k * ldb];
+                            if (!unit) {
+                                const data_t inv_akk = data_t(1.0) / A[(size_t)k * lda + k];
+                                for (int i = 0; i < m; i++) {
+                                    Bk[i] *= inv_akk;
+                                }
+                            }
+                            for (int j = k + 1; j < n; j++) {
+                                const data_t akj = A[(size_t)j * lda + k];
+                                if (akj != data_t(0.0)) {
+                                    RP(data_t) Bj = &B[(size_t)j * ldb];
+                                    for (int i = 0; i < m; i++) {
+                                        Bj[i] -= akj * Bk[i];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        for (int k = n - 1; k >= 0; k--) {
+                            RP(data_t) Bk = &B[(size_t)k * ldb];
+                            if (!unit) {
+                                const data_t inv_akk = data_t(1.0) / A[(size_t)k * lda + k];
+                                for (int i = 0; i < m; i++) {
+                                    Bk[i] *= inv_akk;
+                                }
+                            }
+                            for (int j = 0; j < k; j++) {
+                                const data_t akj = A[(size_t)j * lda + k];
+                                if (akj != data_t(0.0)) {
+                                    RP(data_t) Bj = &B[(size_t)j * ldb];
+                                    for (int i = 0; i < m; i++) {
+                                        Bj[i] -= akj * Bk[i];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if constexpr (std::is_same_v<data_t, double>) {
                 dtrsm_(side, uplo, transa, diag, &m, &n, &alpha, A, &lda, B, &ldb);
             }
@@ -78,6 +166,43 @@ namespace DEV
         template <typename data_t>
         void gemm(const char *transa, const char *transb, const int nrow_op_a, const int ncol_op_b, const int nrow_op_b, const data_t alpha, const data_t *a, const int lda, const data_t *b, const int ldb, const data_t beta, data_t *c, const int ldc)
         {
+            if (nrow_op_a == 0 || ncol_op_b == 0) {
+                return;
+            }
+            const bool ta_n = (transa[0] == 'N' || transa[0] == 'n');
+            const bool tb_n = (transb[0] == 'N' || transb[0] == 'n');
+            if ((ncol_op_b == 1) && tb_n) {
+                const int m_mat = ta_n ? nrow_op_a : nrow_op_b;
+                const int n_mat = ta_n ? nrow_op_b : nrow_op_a;
+                gemv<data_t>(transa, m_mat, n_mat, alpha, a, lda, b, 1, beta, c, 1);
+                return;
+            }
+            if (ta_n && tb_n && ((omp_in_parallel() != 0) || (std::max({ nrow_op_a, ncol_op_b, nrow_op_b }) <= 16))) {
+                for (int j = 0; j < ncol_op_b; j++) {
+                    RP(data_t) Cj = &c[(size_t)j * ldc];
+                    if (beta == data_t(0.0)) {
+                        for (int i = 0; i < nrow_op_a; i++) {
+                            Cj[i] = data_t(0.0);
+                        }
+                    }
+                    else if (beta != data_t(1.0)) {
+                        for (int i = 0; i < nrow_op_a; i++) {
+                            Cj[i] *= beta;
+                        }
+                    }
+                    const data_t *Bj = &b[(size_t)j * ldb];
+                    for (int l = 0; l < nrow_op_b; l++) {
+                        const data_t blj = alpha * Bj[l];
+                        if (blj != data_t(0.0)) {
+                            const data_t *Al = &a[(size_t)l * lda];
+                            for (int i = 0; i < nrow_op_a; i++) {
+                                Cj[i] += blj * Al[i];
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if constexpr (std::is_same_v<data_t, double>) {
                 dgemm_(transa, transb, &nrow_op_a, &ncol_op_b, &nrow_op_b, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
             }

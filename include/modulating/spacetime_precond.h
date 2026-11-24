@@ -25,6 +25,7 @@ namespace TWIST
         // Updates the preconditioner from the current N_t slices, condensers, temporal step sizes dtau[0..nt-1],
         // scalar period T, parameter vector p, and theta (default 1.0, L-stable for DAE algebraic modes).
         void update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0);
+        void update(size_t nt, const SpatialSlice *const *slice_ptrs, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0);
 
         // Applies z = P_ST^(-1) * r on the condensed endpoint space (sum_n slices[n].n_space).
         // `r` and `z` may NOT alias.
@@ -32,12 +33,14 @@ namespace TWIST
 
         size_t totalEndSize() const { return m_total_end; }
         size_t nt() const { return m_nt; }
+        bool isBlockDiag() const { return m_is_block_diag; }
         const SpatialSlice &refSlice() const { return m_ref_slice; }
 
     private:
         struct SchurBlock
         {
             bool is_complex;
+            bool has_upper; // true if S_tau(0..col-1, col[:+1]) has any nonzero entry
             size_t col; // starting index in 0..nt-1
             double a;
             double beta;
@@ -53,8 +56,12 @@ namespace TWIST
         size_t m_total_end = 0;
         double m_T = 1.0;
         double m_theta = 0.55;
+        bool m_is_block_diag = false;
 
         SpatialSlice m_ref_slice;
+        size_t m_ref_sig_nnodes = 0;
+        double *m_ref_sig_t = nullptr;
+        size_t m_ref_sig_cap = 0;
         DEV::BoundaryConditions m_real_bc;
         DEV::ComplexBoundaryConditions m_complex_bc;
         DEV::Matrix m_ref_jac;
@@ -64,12 +71,16 @@ namespace TWIST
         double *m_dtau = nullptr;
         SparseDenseOutputOp *m_to_ref = nullptr;
         SparseDenseOutputOp *m_from_ref = nullptr;
+        size_t *m_sig_nnodes = nullptr;
+        double **m_sig_t = nullptr;
+        size_t *m_sig_cap = nullptr;
         size_t m_slice_cap = 0;
 
         // Temporal Nt x Nt matrices (column-major)
         double *m_S_tau = nullptr;
         double *m_Q_tau = nullptr;
-        double *m_W_in = nullptr; // Q_tau^T * M_tau^(-1)
+        double *m_V_out = nullptr; // Q_tau or Q_tau * Y_tau (column-major)
+        double *m_W_in = nullptr;  // Q_tau^T * M_tau^(-1) or Y_tau^(-1) * Q_tau^T * M_tau^(-1)
         double *m_lapack_work = nullptr;
         int *m_ipiv = nullptr;
         int *m_bwork = nullptr;

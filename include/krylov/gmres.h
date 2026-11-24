@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fmt/core.h"
+#include "linalg.h"
 #include "shared.h"
 #include <cmath>
 #include <cstddef>
@@ -12,16 +13,16 @@ namespace Krylov
     inline size_t gmres_lwork(size_t n, int restart)
     {
         const size_t m = (size_t)restart;
-        return (2 * m + 3) * n + (m + 1) * m + 4 * m + 4;
+        return (2 * m + 4) * n + (m + 1) * m + 5 * m + 4;
     }
 
     // Right-preconditioned restarted GMRES(restart) with optional diagonal quadrature weights
-    // and DGKS double-reorthogonalized Modified Gram-Schmidt.
+    // and BLAS2 CGS2 with conditional DGKS double reorthogonalization.
     // `weights` (length n) may be nullptr for unweighted Euclidean inner product.
     // `work` must have length >= gmres_lwork(n, restart) or be nullptr (auto-allocated and freed).
     // Returns 0 on convergence, 1 if maxiter reached without full convergence, <0 on operator error.
     template <typename A_Op_t, typename M_Op_t>
-    int gmres(A_Op_t &A, M_Op_t &M, size_t n, RP(double) x, const RP(double) b, const double *weights, RP(double) work, int restart, int maxiter, double rtol, double atol, int *niters, bool verbose = false)
+    int gmres(A_Op_t &A, M_Op_t &M, size_t n, RP(double) x, const RP(double) b, const double *weights, RP(double) work, int restart, int maxiter, double rtol, double atol, int *niters, bool verbose = false, bool verify_residual = true)
     {
         if (restart < 1) {
             restart = 1;
@@ -43,8 +44,10 @@ namespace Krylov
         double *sn = cs + m;                   // m
         double *g = sn + m;                    // m + 1
         double *y = g + (m + 1);               // m
-        double *r = y + m;                     // n
+        double *h_corr = y + m;                // m
+        double *r = h_corr + m;                // n
         double *w = r + n;                     // n
+        double *w_w = w + n;                   // n
 
         auto w_dot = [n, weights](const RP(double) u, const RP(double) v) -> double {
             double acc = 0.0;
@@ -67,13 +70,25 @@ namespace Krylov
         };
 
         int total_iters = 0;
-        if (A(x, w, n) != 0) {
-            if (niters) *niters = 0;
-            if (own_work) free(work);
-            return -3;
-        }
+        bool x_is_zero = true;
         for (size_t i = 0; i < n; i++) {
-            r[i] = b[i] - w[i];
+            if (x[i] != 0.0) {
+                x_is_zero = false;
+                break;
+            }
+        }
+        if (x_is_zero) {
+            memcpy(r, b, n * sizeof(double));
+        }
+        else {
+            if (A(x, w, n) != 0) {
+                if (niters) *niters = 0;
+                if (own_work) free(work);
+                return -3;
+            }
+            for (size_t i = 0; i < n; i++) {
+                r[i] = b[i] - w[i];
+            }
         }
         double beta0 = w_norm(r);
         double beta = beta0;
@@ -119,25 +134,35 @@ namespace Krylov
                     return -3;
                 }
 
-                // Modified Gram-Schmidt with DGKS double reorthogonalization
-                for (int i = 0; i <= j; i++) {
-                    const double *vi = &V[(size_t)i * n];
-                    const double hij = w_dot(vi, w);
-                    hj[i] = hij;
+                // BLAS2 CGS2 with conditional DGKS reorthogonalization
+                const int in = (int)n;
+                const int inc = 1;
+                const double norm_before = w_norm(w);
+                const double *w_weighted = w;
+                if (weights != nullptr) {
                     for (size_t q = 0; q < n; q++) {
-                        w[q] -= hij * vi[q];
+                        w_w[q] = weights[q] * w[q];
                     }
+                    w_weighted = w_w;
                 }
-                for (int i = 0; i <= j; i++) {
-                    const double *vi = &V[(size_t)i * n];
-                    const double corr = w_dot(vi, w);
-                    hj[i] += corr;
-                    for (size_t q = 0; q < n; q++) {
-                        w[q] -= corr * vi[q];
-                    }
-                }
+                dgemv("T", in, j + 1, 1.0, V, in, w_weighted, inc, 0.0, hj, inc);
+                dgemv("N", in, j + 1, -1.0, V, in, hj, inc, 1.0, w, inc);
 
-                const double h_next = w_norm(w);
+                double h_next = w_norm(w);
+                if (h_next < 0.7 * norm_before) {
+                    if (weights != nullptr) {
+                        for (size_t q = 0; q < n; q++) {
+                            w_w[q] = weights[q] * w[q];
+                        }
+                        w_weighted = w_w;
+                    }
+                    dgemv("T", in, j + 1, 1.0, V, in, w_weighted, inc, 0.0, h_corr, inc);
+                    dgemv("N", in, j + 1, -1.0, V, in, h_corr, inc, 1.0, w, inc);
+                    for (int i = 0; i <= j; i++) {
+                        hj[i] += h_corr[i];
+                    }
+                    h_next = w_norm(w);
+                }
                 hj[j + 1] = h_next;
                 if (h_next > 0.0) {
                     double *vj1 = &V[(size_t)(j + 1) * n];
@@ -195,12 +220,13 @@ namespace Krylov
                 y[i] = (std::abs(diag) > 1e-300) ? (sum / diag) : 0.0;
             }
 
-            for (int i = 0; i < k_used; i++) {
-                const double yi = y[i];
-                const double *zi = &Z[(size_t)i * n];
-                for (size_t q = 0; q < n; q++) {
-                    x[q] += yi * zi[q];
-                }
+            if (k_used > 0) {
+                dgemv("N", (int)n, k_used, 1.0, Z, (int)n, y, 1, 1.0, x, 1);
+            }
+
+            if (!verify_residual && converged && total_iters <= restart && rtol >= 1e-8) {
+                status = 0;
+                break;
             }
 
             // Recompute true residual

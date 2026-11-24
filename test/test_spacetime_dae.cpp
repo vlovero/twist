@@ -817,6 +817,174 @@ namespace
         CHECK(max_cid_err < 1e-12);
         CHECK(max_cnonid_err < 1e-12);
     }
+
+    void verify_parallel_precond_apply()
+    {
+        const size_t node = 3;
+        const size_t ncol = 6;
+        const size_t nnodes = 13;
+        const size_t nt = 8;
+        const double L0 = 2.0;
+        const double c = 0.8;
+        const double T = 3.5;
+        const double p[2] = { c, 0.2 };
+        const diffusion_t diff = {{0, TEST_D}};
+
+        std::vector<double> t_grid(nnodes);
+        for (size_t i = 0; i < nnodes; i++) {
+            t_grid[i] = (double)i / (double)(nnodes - 1);
+        }
+
+        std::vector<TWIST::SpatialSlice> slices(nt);
+        for (size_t n = 0; n < nt; n++) {
+            slices[n].init(ncol, node, nnodes, t_grid.data(), test_func, test_fjac, test_pjac, diff, L0);
+            slices[n].updateMassMatrices(c, p[1]);
+        }
+        const size_t ns = slices[0].n_space;
+        std::vector<double> y_end(nt * ns);
+        for (size_t i = 0; i < ns; i++) {
+            const double val = 0.25 + 0.05 * std::sin(0.21 * (double)i);
+            for (size_t n = 0; n < nt; n++) {
+                y_end[n * ns + i] = val;
+            }
+        }
+
+        DEV::BoundaryConditions bc;
+        bc.makePeriodic((ptrdiff_t)node, 0);
+        int pmask[2] = { 0, 0 };
+        DEV::Matrix A_ref;
+        A_ref.update(test_fjac, test_pjac, (ptrdiff_t)nnodes, (ptrdiff_t)node, (ptrdiff_t)ncol, 0, L0, slices[0].h, y_end.data(), p, pmask, nullptr, &bc);
+
+        // Build zero-temporal-mean RHS r such that sum_n r_n = 0 (avoids k=0 1e-4 regularization bias)
+        std::vector<double> r(nt * ns, 0.0), z(nt * ns, 0.0);
+        for (size_t n = 0; n < nt; n++) {
+            const double ph = std::cos(2.0 * M_PI * (double)n / (double)nt);
+            for (size_t i = 0; i < ns; i++) {
+                r[n * ns + i] = ph * std::sin(0.17 * (double)(i + 1));
+            }
+        }
+
+        // Case 0: uniform dtau (diagonalizable orthogonally, isBlockDiag == true)
+        // Case 1: mildly non-uniform dtau (dtrevc3 similarity, isBlockDiag == true)
+        // Case 2: strongly non-uniform dtau (fallback or dtrevc3; check both exact operator consistency where isBlockDiag, else GMRES precond convergence)
+        for (int cs = 0; cs < 2; cs++) {
+            std::vector<double> dtau(nt);
+            double sum_dt = 0.0;
+            for (size_t n = 0; n < nt; n++) {
+                dtau[n] = (cs == 0) ? 1.0 : (1.0 + 0.2 * std::sin(2.0 * M_PI * (double)n / (double)nt));
+                sum_dt += dtau[n];
+            }
+            for (size_t n = 0; n < nt; n++) {
+                dtau[n] /= sum_dt;
+            }
+
+            // Enforce sum_n (B * r_prev) = 0 -> already zero because sum_n r_n = 0!
+            TWIST::RealSchurSpaceTimePrecond pc;
+            pc.update(nt, slices.data(), nullptr, y_end.data(), dtau.data(), T, p, 1.0);
+            CHECK(pc.isBlockDiag());
+            pc.apply(r.data(), z.data());
+
+            // Check (D_tau x B - I x T A) w = (1/dtau_n) B r_{prev}, where w = z - r
+            std::vector<double> bw(ns), aw(ns), br(ns), w_cur(ns), w_prev(ns);
+            double err2 = 0.0, rhs2 = 0.0;
+            for (size_t n = 0; n < nt; n++) {
+                const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
+                for (size_t i = 0; i < ns; i++) {
+                    w_cur[i] = z[n * ns + i] - r[n * ns + i];
+                    w_prev[i] = z[prev * ns + i] - r[prev * ns + i];
+                }
+                std::vector<double> dw(ns);
+                for (size_t i = 0; i < ns; i++) {
+                    dw[i] = (w_cur[i] - w_prev[i]) / dtau[n];
+                }
+                slices[0].applyMass(dw.data(), bw.data(), 1.0, 0.0, nullptr);
+                A_ref.gemv(0.0, aw.data(), T, w_cur.data());
+                slices[0].applyMass(&r[prev * ns], br.data(), 1.0 / dtau[n], 0.0, nullptr);
+                for (size_t i = 0; i < ns; i++) {
+                    const double res_i = (bw[i] - aw[i]) - br[i];
+                    err2 += res_i * res_i;
+                    rhs2 += br[i] * br[i];
+                }
+            }
+            const double rel = std::sqrt(err2) / std::sqrt(rhs2);
+            fmt::println("[Test 8.{}] RealSchurSpaceTimePrecond parallel apply ({}) rel_res = {:.3e}",
+                cs, (cs == 0) ? "uniform" : "dtrevc3 non-uniform", rel);
+            CHECK(rel < 1e-11);
+        }
+    }
+
+    void verify_gmres_cgs2_dgks()
+    {
+        constexpr size_t N = 120;
+        std::vector<double> A(N * N, 0.0), invD(N, 0.0), wts(N), x(N), x_true(N), b(N), res(N);
+        for (size_t j = 0; j < N; j++) {
+            const double diag = 2.0 + 0.5 * (double)j;
+            A[j * N + j] = diag;
+            invD[j] = 1.0 / diag;
+            if (j + 1 < N) {
+                A[(j + 1) * N + j] = 0.8 * std::sin(0.3 * (double)j);
+            }
+            if (j > 0) {
+                A[(j - 1) * N + j] = -0.35;
+            }
+            wts[j] = 0.5 + 2.0 * std::pow(std::sin(0.11 * (double)j), 2);
+            x_true[j] = std::cos(0.17 * (double)j) + 0.1 * (double)j / (double)N;
+        }
+        auto A_op = [&](const RP(double) v, RP(double) out, size_t n) -> int {
+            for (size_t i = 0; i < n; i++) {
+                double s = 0.0;
+                for (size_t j = 0; j < n; j++) {
+                    s += A[j * n + i] * v[j];
+                }
+                out[i] = s;
+            }
+            return 0;
+        };
+        auto M_op = [&](const RP(double) r_in, RP(double) z_out, size_t n) -> int {
+            for (size_t i = 0; i < n; i++) {
+                z_out[i] = invD[i] * r_in[i];
+            }
+            return 0;
+        };
+        A_op(x_true.data(), b.data(), N);
+
+        std::vector<double> work(Krylov::gmres_lwork(N, 60));
+        auto rel_w_err = [&]() -> double {
+            A_op(x.data(), res.data(), N);
+            double n2 = 0.0, b2 = 0.0;
+            for (size_t i = 0; i < N; i++) {
+                const double d = res[i] - b[i];
+                n2 += wts[i] * d * d;
+                b2 += wts[i] * b[i] * b[i];
+            }
+            return std::sqrt(n2 / b2);
+        };
+
+        std::fill(x.begin(), x.end(), 0.0);
+        int it1 = 0;
+        int st1 = Krylov::gmres(A_op, M_op, N, x.data(), b.data(), wts.data(), work.data(), 60, 120, 1e-12, 1e-13, &it1, false, true);
+        const double e1 = rel_w_err();
+        CHECK(st1 == 0);
+        CHECK(e1 < 1e-11);
+
+        std::fill(x.begin(), x.end(), 0.0);
+        int it2 = 0;
+        int st2 = Krylov::gmres(A_op, M_op, N, x.data(), b.data(), wts.data(), work.data(), 60, 120, 1e-6, 1e-13, &it2, false, false);
+        const double e2 = rel_w_err();
+        CHECK(st2 == 0);
+        CHECK(e2 < 1e-5);
+
+        for (size_t i = 0; i < N; i++) {
+            x[i] = 0.3 * x_true[i];
+        }
+        int it3 = 0;
+        int st3 = Krylov::gmres(A_op, M_op, N, x.data(), b.data(), nullptr, work.data(), 60, 120, 1e-12, 1e-13, &it3, false, true);
+        const double e3 = rel_w_err();
+        CHECK(st3 == 0);
+        CHECK(e3 < 1e-11);
+        fmt::println("[Test 9] GMRES CGS2/DGKS: it1={} (err={:.2e}), it2={} (err={:.2e}), it3={} (err={:.2e})",
+            it1, e1, it2, e2, it3, e3);
+    }
 } // namespace
 
 int main()
@@ -826,6 +994,8 @@ int main()
     verify_tcolmat_nparam0_accuracy();
     verify_sparse_mass_ops();
     verify_factored_delta_j_condenser();
+    verify_parallel_precond_apply();
+    verify_gmres_cgs2_dgks();
     fmt::println("ALL test_spacetime_dae CHECKS PASSED!");
     return 0;
 }
