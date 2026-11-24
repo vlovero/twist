@@ -723,7 +723,7 @@ namespace TWIST
         if (update_precond) {
             double *y_end = m_bord_sol; // temporary use before GMRES
             syncEndpointsFromStages(y_end);
-            m_precond.update(m_nt, m_slices, m_condensers, y_end, m_dtau, m_T, m_p, 0.55);
+            m_precond.update(m_nt, m_slices, m_condensers, y_end, m_dtau, m_T, m_p, 1.0);
         }
     }
 

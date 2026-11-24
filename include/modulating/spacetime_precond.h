@@ -22,8 +22,8 @@ namespace TWIST
         void freeBuffers();
 
         // Updates the preconditioner from the current N_t slices, condensers, temporal step sizes dtau[0..nt-1],
-        // scalar period T, parameter vector p, and theta (default 0.55).
-        void update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 0.55);
+        // scalar period T, parameter vector p, and theta (default 1.0, L-stable for DAE algebraic modes).
+        void update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0);
 
         // Applies z = P_ST^(-1) * r on the condensed endpoint space (sum_n slices[n].n_space).
         // `r` and `z` may NOT alias.

@@ -153,16 +153,16 @@ namespace Krylov
                     }
                     const double scale = (scale_log != 0.0) ? std::exp(scale_log) : 1.0;
                     const double tr = 0.5 * (P[0] + P[3]);
-                    const double det_part = (P[0] - tr) * (P[3] - tr) - P[1] * P[2];
-                    if (det_part <= 0.0) {
-                        const double im = std::sqrt(-det_part);
+                    const double disc = (P[0] - tr) * (P[0] - tr) + P[1] * P[2];
+                    if (disc <= 0.0) {
+                        const double im = std::sqrt(-disc);
                         wr[i] = tr * scale;
                         wi[i] = im * scale;
                         wr[i + 1] = tr * scale;
                         wi[i + 1] = -im * scale;
                     }
                     else {
-                        const double sq = std::sqrt(det_part);
+                        const double sq = std::sqrt(disc);
                         wr[i] = (tr + sq) * scale;
                         wi[i] = 0.0;
                         wr[i + 1] = (tr - sq) * scale;
@@ -291,8 +291,8 @@ namespace Krylov
                     }
                 }
                 const double tr = 0.5 * (P[0] + P[3]);
-                const double det_part = (P[0] - tr) * (P[3] - tr) - P[1] * P[2];
-                if (det_part < 0.0) {
+                const double disc = (P[0] - tr) * (P[0] - tr) + P[1] * P[2];
+                if (disc < 0.0) {
                     // Complex conjugate pair -> converged 2x2 Schur block!
                     if (ilo == 0) break;
                     ihi = ilo - 1;
@@ -330,13 +330,74 @@ namespace Krylov
             // Actually, compute shift & first column using the SAME per-factor normalization!
             // Even better: for single-shift when (ihi - ilo == 1) or double-shift when (ihi - ilo >= 2):
             if (ihi == ilo + 1) {
+                // Check if any upper-triangular factor H[m] (0 <= m < p-1) has a negligible diagonal entry
+                // at ilo or ihi; if so, single-shift on P2 stagnates because P2 is singular/triangular.
+                // Deflate H[p-1][ihi, ilo] directly via cyclic Givens rotation!
+                size_t zero_m = p;
+                bool zero_at_ihi = false;
+                for (size_t m = 0; m < p - 1; m++) {
+                    double hmax = 0.0;
+                    for (size_t q = 0; q < n; q++) {
+                        hmax = std::max(hmax, std::max(std::abs(H[m][ilo * n + q]), std::abs(H[m][ihi * n + q])));
+                    }
+                    const double mtol = std::max(eps * hmax, 1e-300);
+                    if (std::abs(H[m][ihi * n + ihi]) <= mtol) {
+                        zero_m = m;
+                        zero_at_ihi = true;
+                        break;
+                    }
+                    if (std::abs(H[m][ilo * n + ilo]) <= mtol) {
+                        zero_m = m;
+                        zero_at_ihi = false;
+                        break;
+                    }
+                }
+                if (zero_m < p - 1) {
+                    if (!zero_at_ihi) {
+                        // Move zero at H[zero_m][ilo, ilo] to H[zero_m][ihi, ihi] by zeroing H[zero_m][ihi, ihi]
+                        // against H[zero_m][ihi, ilo] (row ihi, cols ilo..ihi -> row ilo, col ihi) via Left Givens
+                        // Note: H[zero_m] has [0, b; 0, d] on (ilo..ihi) -> -s*b + c*d = 0 with givens(b, d, c, s)
+                        double cz, sz;
+                        givens(H[zero_m][ihi * n + ilo], H[zero_m][ihi * n + ihi], cz, sz);
+                        apply_givens_left(n, H[zero_m], n, ilo, ihi, ilo, n, cz, sz);
+                        H[zero_m][ihi * n + ilo] = 0.0;
+                        H[zero_m][ihi * n + ihi] = 0.0;
+                        apply_givens_right(Z[zero_m + 1], n, 0, n, ilo, ihi, cz, sz);
+                        apply_givens_right(H[zero_m + 1], n, 0, ihi + 1, ilo, ihi, cz, sz);
+                        for (size_t m = zero_m + 1; m < p - 1; m++) {
+                            double cm, sm;
+                            givens(H[m][ilo * n + ilo], H[m][ilo * n + ihi], cm, sm);
+                            apply_givens_left(n, H[m], n, ilo, ihi, ilo, n, cm, sm);
+                            H[m][ilo * n + ihi] = 0.0;
+                            apply_givens_right(Z[m + 1], n, 0, n, ilo, ihi, cm, sm);
+                            apply_givens_right(H[m + 1], n, 0, ihi + 1, ilo, ihi, cm, sm);
+                        }
+                    }
+                    // Now H[zero_m][ihi, ihi] == 0 (and H[zero_m][ihi, ilo] == 0), so row ihi of H[zero_m] on 0..ihi is 0.
+                    // Zero H[p-1][ihi, ilo] from the left and chase forward through H[0..zero_m-1].
+                    double cp, sp;
+                    givens(H[p - 1][ilo * n + ilo], H[p - 1][ilo * n + ihi], cp, sp);
+                    apply_givens_left(n, H[p - 1], n, ilo, ihi, ilo, n, cp, sp);
+                    H[p - 1][ilo * n + ihi] = 0.0;
+                    apply_givens_right(Z[0], n, 0, n, ilo, ihi, cp, sp);
+                    apply_givens_right(H[0], n, 0, ihi + 1, ilo, ihi, cp, sp);
+                    for (size_t m = 0; m < zero_m; m++) {
+                        double cm, sm;
+                        givens(H[m][ilo * n + ilo], H[m][ilo * n + ihi], cm, sm);
+                        apply_givens_left(n, H[m], n, ilo, ihi, ilo, n, cm, sm);
+                        H[m][ilo * n + ihi] = 0.0;
+                        apply_givens_right(Z[m + 1], n, 0, n, ilo, ihi, cm, sm);
+                        apply_givens_right(H[m + 1], n, 0, ihi + 1, ilo, ihi, cm, sm);
+                    }
+                    H[zero_m][ilo * n + ihi] = 0.0;
+                    continue;
+                }
+
                 // 2x2 real split: pick eigenvalue of P2 closer to P2[3]
                 const double tr = 0.5 * (P2[0] + P2[3]);
-                const double disc = std::sqrt(std::max(0.0, (P2[0] - tr) * (P2[3] - tr) - P2[1] * P2[2]));
+                const double disc = std::sqrt(std::max(0.0, (P2[0] - tr) * (P2[0] - tr) + P2[1] * P2[2]));
                 const double s1 = tr + disc, s2 = tr - disc;
                 const double shift = (std::abs(s1 - P2[3]) < std::abs(s2 - P2[3])) ? s1 : s2;
-                // Wait: if P2 was rescaled, we must compute Pi_2x2 without independent scaling or track shared scale!
-                // Wait: for 2x2 active block, P2 IS the whole active block! So (P2 - shift * I) * e0 has exact first col!
                 double v[2] = { P2[0] - shift, P2[1] };
                 double c, s;
                 givens(v[0], v[1], c, s);
@@ -417,7 +478,7 @@ namespace Krylov
 
             if (iters % 10 == 0) {
                 // Exceptional shift to break stagnation
-                const double es = std::abs(H[p - 1][ihi * n + (ihi - 1)]) + std::abs(H[p - 1][(ihi - 1) * n + (ihi - 2)]);
+                const double es = std::abs(H[p - 1][(ihi - 1) * n + ihi]) + std::abs(H[p - 1][(ihi - 2) * n + (ihi - 1)]);
                 B2[0] = 0.75 * es; B2[3] = 0.75 * es; B2[1] = -0.4375 * es; B2[2] = es;
                 log_b = log_t;
             }
@@ -557,7 +618,7 @@ namespace Krylov
                 memset(M_qr, 0, sizeof(M_qr));
                 for (size_t c = 0; c < d2; c++) {
                     for (size_t r = 0; r < d1; r++) {
-                        M_qr[c * d + r] = -Xm[c * d1 + r];
+                        M_qr[c * d + r] = Xm[c * d1 + r];
                     }
                     M_qr[c * d + (d1 + c)] = 1.0;
                 }

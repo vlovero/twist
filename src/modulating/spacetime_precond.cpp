@@ -302,14 +302,15 @@ namespace TWIST
         double *tmp_Br = tmp_ref + n_ref;           // n_ref
         double *mass_work = tmp_Br + n_ref;         // >= node * nstages
 
-        // 1. Project r_n -> ref mesh and apply numerator (1/dtau_n * B_ref - theta * T * A_ref) r_ref_n
+        // 1. Identity-split form: z_n = r_n + P_from[n]( w_ref[n] ) where
+        //    (D_tau x B_ref - M_tau x T * A_ref) w_ref = (1/dtau_n B_ref + (1 - theta) * T * A_ref) P_to[prev](r_prev).
+        //    Preserves exact identity on algebraic & stiff modes across arbitrary spatial mesh jumps.
         for (size_t n = 0; n < nt; n++) {
-            m_to_ref[n].apply(&r[m_offsets[n]], tmp_ref);
-            m_ref_slice.applyMass(tmp_ref, tmp_Br, 1.0 / m_dtau[n], 0.0, mass_work);
-            m_ref_jac.gemv(0.0, &r_ref[n * n_ref], -m_theta * m_T, tmp_ref);
-            double *rn_out = &r_ref[n * n_ref];
-            for (size_t i = 0; i < n_ref; i++) {
-                rn_out[i] += tmp_Br[i];
+            const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
+            m_to_ref[prev].apply(&r[m_offsets[prev]], tmp_ref);
+            m_ref_slice.applyMass(tmp_ref, &r_ref[n * n_ref], 1.0 / m_dtau[n], 0.0, mass_work);
+            if (m_theta != 1.0) {
+                m_ref_jac.gemv(1.0, &r_ref[n * n_ref], (1.0 - m_theta) * m_T, tmp_ref);
             }
         }
 
@@ -386,9 +387,14 @@ namespace TWIST
         // 4. Transform back: z_ref = z_hat * Q_tau^T
         dgemm("N", "T", in_ref, int_nt, int_nt, 1.0, z_hat, in_ref, m_Q_tau, int_nt, 0.0, z_ref, in_ref);
 
-        // 5. Project z_ref_n -> z_n on each element's own spatial mesh
+        // 5. Project w_ref_n -> slice n and add back r_n: z_n = r_n + P_from[n](w_ref_n)
         for (size_t n = 0; n < nt; n++) {
-            m_from_ref[n].apply(&z_ref[n * n_ref], &z[m_offsets[n]]);
+            const size_t ns = m_offsets[n + 1] - m_offsets[n];
+            const size_t off = m_offsets[n];
+            m_from_ref[n].apply(&z_ref[n * n_ref], tmp_ref);
+            for (size_t i = 0; i < ns; i++) {
+                z[off + i] = r[off + i] + tmp_ref[i];
+            }
         }
     }
 } // namespace TWIST
