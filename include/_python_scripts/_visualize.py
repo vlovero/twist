@@ -14,6 +14,57 @@ from matplotlib.collections import LineCollection
 SADDLE_NODE = 1
 BRANCH_POINT = 2
 TORUS_POINT = 3
+FOLD_PERIODIC = 4
+PERIOD_DOUBLING = 5
+NEIMARK_SACKER = 6
+
+FILETYPE_HOPF_CONTINUATION = 5
+
+
+def is_hopf_file(data: h5py.File):
+    return ("meta_data/file_type" in data) and (int(data["meta_data/file_type"][0]) == FILETYPE_HOPF_CONTINUATION)
+
+
+def get_floquet_multipliers(file, solution_id):
+    mr = file[f"{solution_id}/mu_real"][...]
+    mi = file[f"{solution_id}/mu_imag"][...]
+    return mr, mi
+
+
+def gen_hopf_apds(data: h5py.File, apd_value):
+    n = len(data) - 2
+    L0 = 2 * data["basic_info/spatial_period"][0]
+    r = 1.0 - apd_value * 1e-2
+    apds_mean = []
+    apds_min = []
+    apds_max = []
+    for k in range(n):
+        sol = data[f"{k}"]
+        L = sol["p"][-1] * L0
+        c = sol["c"][0]
+        kymo = sol["kymograph"][:, :, 0]
+        x = np.linspace(0, L, kymo.shape[1])
+        vals = []
+        for row in kymo:
+            vmin, vmax = row.min(), row.max()
+            thresh = vmin * (1 - r) + vmax * r
+            mask = row >= thresh
+            if mask.any() and not mask.all():
+                ishift = mask.argmin()
+                if ishift:
+                    mask = np.roll(mask, -ishift - 1)
+                istart = mask.argmax()
+                istop = len(row) - 1 - mask[::-1].argmax()
+                vals.append((x[istop] - x[istart]) / abs(c))
+        if vals:
+            apds_min.append(min(vals))
+            apds_max.append(max(vals))
+            apds_mean.append(0.5 * (min(vals) + max(vals)))
+        else:
+            apds_min.append(0.0)
+            apds_max.append(0.0)
+            apds_mean.append(0.0)
+    return np.array(apds_mean), np.array(apds_min), np.array(apds_max)
 
 _RENDERING = True
 
@@ -343,6 +394,8 @@ class DispersionCurve:
         fignum=None,
         do_l2_norms=False,
         do_apds=False,
+        do_amplitude=False,
+        do_period=False,
         apd_value=90,
         individual=False,
         no_stability=False,
@@ -367,7 +420,14 @@ class DispersionCurve:
         self.fip = FileIndexPartition(self.continuation_data)
         cmdline = "".join(map(chr, self.continuation_data[0]["meta_data/cmdline"][:]))
         self.profile_index = 0
-        with open(cmdline.split()[2]) as spec_file:
+        spec_path = None
+        for tok in cmdline.split():
+            if tok.endswith(".json") and os.path.exists(tok):
+                spec_path = tok
+                break
+        if spec_path is None:
+            spec_path = cmdline.split()[2]
+        with open(spec_path) as spec_file:
             partial = r"\frac{\partial}{\partial \xi} "
             spec = json.load(spec_file)
             names = np.array(list(spec["system"].keys()), object)
@@ -385,7 +445,9 @@ class DispersionCurve:
                 transforms = None
             self.transforms = transforms
 
-        if all(("0/spectrum" not in file) for file in self.continuation_data) or no_stability:
+        has_steady_spec = any("0/spectrum" in file for file in self.continuation_data)
+        has_floquet = any("0/floquet" in file for file in self.continuation_data)
+        if (not has_steady_spec and not has_floquet) or no_stability:
             self.stability_data = None
         else:
             self.stability_data = True
@@ -415,7 +477,11 @@ class DispersionCurve:
 
         self.do_l2_norms = do_l2_norms
         self.do_apds = do_apds
+        self.do_amplitude = do_amplitude
+        self.do_period = do_period
         self.apd_value = apd_value
+        self.kymo_im = None
+        self.unit_circle_line = None
         self.dispersion_mode, *self.dispersion_mode_colors = dispersion_mode.split(":")
 
         self.solution_index = 0
@@ -600,30 +666,60 @@ class DispersionCurve:
         for file in self.continuation_data:
             nsolutions = len(file) - 2
             pmask = file["basic_info/pmask"][...]
+            hopf_mode = is_hopf_file(file)
 
             stability = []
             c, alpha = np.empty((2, nsolutions))
             for k in range(nsolutions):
                 c[k], alpha[k] = file[f"{k}/p"][...][pmask]
                 solution_types.append(file[f"{k}/stype"][0])
-                if self.stability_data and (f"{k}/spectrum" in file):
-                    evals = get_eigenvalues(file, f"{k}/spectrum")
-                    evals = evals[0] + 1j * evals[1]
-                    evals = evals - evals[abs(evals).argmin()].real
-                    stable = (evals.real <= 0).all()
-                    stability.append(stable)
+                if hopf_mode:
+                    if self.do_amplitude:
+                        c[k] = file[f"{k}/amplitude"][0]
+                    elif self.do_period:
+                        c[k] = file[f"{k}/T"][0]
+                    elif self.do_l2_norms:
+                        c[k] = file[f"{k}/norm_l2"][0]
+                    if self.stability_data and (f"{k}/floquet" in file):
+                        stable = int(file[f"{k}/floquet/n_unstable"][0]) == 0
+                        stability.append(stable)
+                    else:
+                        stability.append(-1)
                 else:
-                    stability.append(-1)
+                    if self.stability_data and (f"{k}/spectrum" in file):
+                        evals = get_eigenvalues(file, f"{k}/spectrum")
+                        evals = evals[0] + 1j * evals[1]
+                        evals = evals - evals[abs(evals).argmin()].real
+                        stable = (evals.real <= 0).all()
+                        stability.append(stable)
+                    else:
+                        stability.append(-1)
 
-            if self.do_l2_norms:
-                c = gen_l2_norms(file)
-                ax.set_ylabel(r"$\|u(\xi)\|_2$")
-            elif self.do_apds:
-                c = gen_apds(file, self.apd_value)
-                if self.wave_speed_units is not None:
-                    ax.set_ylabel(f"APD{self.apd_value} ({self.wave_speed_units})")
-                else:
-                    ax.set_ylabel(f"APD{self.apd_value}")
+            if hopf_mode:
+                if self.do_amplitude:
+                    ax.set_ylabel(r"amplitude $A$")
+                elif self.do_period:
+                    ax.set_ylabel(r"period $T$")
+                elif self.do_l2_norms:
+                    ax.set_ylabel(r"$\|u\|_2$")
+                elif self.do_apds:
+                    c, apd_min, apd_max = gen_hopf_apds(file, self.apd_value)
+                    ax.plot(alpha, apd_min, "--", lw=1, alpha=0.6, color="gray")
+                    ax.plot(alpha, apd_max, "--", lw=1, alpha=0.6, color="gray")
+                    if self.wave_speed_units is not None:
+                        ax.set_ylabel(f"APD{self.apd_value} ({self.wave_speed_units})")
+                    else:
+                        ax.set_ylabel(f"APD{self.apd_value}")
+            else:
+                if self.do_l2_norms:
+                    c = gen_l2_norms(file)
+                    ax.set_ylabel(r"$\|u(\xi)\|_2$")
+                elif self.do_apds:
+                    c = gen_apds(file, self.apd_value)
+                    if self.wave_speed_units is not None:
+                        ax.set_ylabel(f"APD{self.apd_value} ({self.wave_speed_units})")
+                    else:
+                        ax.set_ylabel(f"APD{self.apd_value}")
                     
 
             if c_all:
@@ -667,12 +763,16 @@ class DispersionCurve:
             ax.scatter(alpha[solution_types == SADDLE_NODE], c[solution_types == SADDLE_NODE], c="violet", zorder=13, marker="s")
             ax.scatter(alpha[solution_types == TORUS_POINT], c[solution_types == TORUS_POINT], c="limegreen", zorder=13, marker="o")
             ax.scatter(alpha[solution_types == BRANCH_POINT], c[solution_types == BRANCH_POINT], c="violet", zorder=13, marker="^")
+            ax.scatter(alpha[solution_types == FOLD_PERIODIC], c[solution_types == FOLD_PERIODIC], c="darkorange", zorder=14, marker="s")
+            ax.scatter(alpha[solution_types == PERIOD_DOUBLING], c[solution_types == PERIOD_DOUBLING], c="deepskyblue", zorder=14, marker="D")
+            ax.scatter(alpha[solution_types == NEIMARK_SACKER], c[solution_types == NEIMARK_SACKER], c="gold", zorder=14, marker="*", s=70)
 
     def _init_solution_plot(self, index=0):
         ax1 = self.ax1
         ax2 = self.ax2
-        file = self.continuation_data[self.fip.index(index)]
-        index -= self.fip.partitions[self.fip.index(index)][0]
+        file_idx = self.fip.index(index)
+        file = self.continuation_data[file_idx]
+        local_idx = index - self.fip.partitions[file_idx][0]
 
         s = int(file["basic_info/nstages"][...][0])
         self.node = int(file["basic_info/node"][...][0])
@@ -691,9 +791,7 @@ class DispersionCurve:
             ax2.set_xlabel(r"$\xi$")
         if self.stability_data is not None:
             self.spectrum_points = self.spectrum_ax.scatter
-            self.spectrum_sc = plot_spectrum(
-                f"{index}/spectrum", file, ax=self.spectrum_ax, color=self.sol_line.get_color(), set_lim=not self.initialized
-            )
+            self.spectrum_sc = self.spectrum_ax.scatter([], [], c=self.sol_line.get_color(), s=16, zorder=13)
         self._plot_solution_at_index(index)
 
     def _update_inactive_solutions(self):
@@ -701,76 +799,121 @@ class DispersionCurve:
 
         for index, line in zip(self.shown_solutions[:-1], self.ax2.get_lines()):
             file = self.continuation_data[self.fip.index(index)]
-            t = file[f"{index}/t"][...]
+            if is_hopf_file(file):
+                continue
+            sol_idx = index - self.fip.partitions[self.fip.index(index)][0]
+            t = file[f"{sol_idx}/t"][...]
             t = np.append(np.append(t[:-1, None], t[:-1, None] + np.diff(t)[:, None] * self.gauss, axis=1).ravel(), t[-1])
-            y = file[f"{index}/state_curr"][self.profile_index :: node][: len(t)]
+            y = file[f"{sol_idx}/state_curr"][self.profile_index :: node][: len(t)]
             line.set_data(t, y)
 
     def _plot_solution_at_index(self, index):
-        node = self.node
         index = ((index % self.nsolutions) + self.nsolutions) % self.nsolutions
-        file = self.continuation_data[self.fip.index(index)]
-        sol_index = index - self.fip.partitions[self.fip.index(index)][0]
+        file_idx = self.fip.index(index)
+        file = self.continuation_data[file_idx]
+        sol_index = index - self.fip.partitions[file_idx][0]
+        hopf_mode = is_hopf_file(file)
+        node = int(file["basic_info/node"][...][0])
+        self.node = node
 
-        t = file[f"{sol_index}/t"][...]
-        t = np.append(np.append(t[:-1, None], t[:-1, None] + np.diff(t)[:, None] * self.gauss, axis=1).ravel(), t[-1])
-        if self.actual_spatial_period:
-            t *= file["basic_info/spatial_period"][0] * 2
-            if file["basic_info/pmask"][1] == (file["basic_info/np"][0] - 1):
-                t *= self.alpha[index] / t[-1]
-            if self.center_wave:
-                t -= t[-1] * 0.5
-        y = file[f"{sol_index}/state_curr"][self.profile_index :: node][: len(t)]
-        # apply transforms
-        if self.transforms is not None:
-            for index, shift, scale in self.transforms:
-                if index == self.profile_index:
-                    y = y * scale - shift
-                    break
-
-        self.sol_line.set_data(t, y)
         self.sol_dot.set_data(self.alpha[[index]], self.c[[index]])
 
-        self.ax2.relim()
-        self.ax2.autoscale_view(True, True, True)
-        ylabel = self.names[self.profile_index]
-        if self.wave_profile_units is not None:
-            ylabel = f"{ylabel} ({self.wave_profile_units})"
-        self.ax2.set_ylabel(ylabel)
-
-        if self.stability_data is not None:
-            if f"{sol_index}/spectrum" in file:
-                x, y = get_eigenvalues(file, f"{sol_index}/spectrum")
+        if hopf_mode:
+            self.sol_line.set_data([], [])
+            kymo = file[f"{sol_index}/kymograph"][:, :, self.profile_index]
+            if self.transforms is not None:
+                for t_idx, shift, scale in self.transforms:
+                    if t_idx == self.profile_index:
+                        kymo = kymo * scale - shift
+                        break
+            x_hi = 1.0
+            if self.actual_spatial_period:
+                x_hi = float(file["basic_info/spatial_period"][0] * 2 * file[f"{sol_index}/p"][-1])
+            T_val = float(file[f"{sol_index}/T"][0])
+            c_val = float(file[f"{sol_index}/c"][0])
+            A_val = float(file[f"{sol_index}/amplitude"][0])
+            x_lo = -0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else 0.0
+            x_end = 0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else x_hi
+            if self.kymo_im is None:
+                self.kymo_im = self.ax2.imshow(kymo, aspect="auto", origin="lower", extent=[x_lo, x_end, 0.0, T_val], cmap="viridis")
             else:
-                x, y = [], []
-            self.spectrum_sc.set_offsets(np.c_[x, y])
-            self.spectrum_ax.relim()
-            self.ax2.autoscale_view(True, True, True)
-
-        if self.initialized:
-            self.ax1.draw_artist(self.ax1.patch)
-            self.ax2.draw_artist(self.ax2.patch)
-            self.ax1.draw_artist(self.disp_line)
-            self.ax2.draw_artist(self.ax2.yaxis)
-
-            for i in range(0, len(self.all_plots) - 2, 2):
-                self.ax1.draw_artist(self.all_plots[i + 0])
-                self.ax2.draw_artist(self.all_plots[i + 1])
-
-            self.ax1.draw_artist(self.sol_dot)
-            self.ax2.draw_artist(self.sol_line)
+                self.kymo_im.set_visible(True)
+                self.kymo_im.set_data(kymo)
+                self.kymo_im.set_extent([x_lo, x_end, 0.0, T_val])
+                self.kymo_im.autoscale()
+            self.ax2.set_xlim(x_lo, x_end)
+            self.ax2.set_ylim(0.0, T_val)
+            self.ax2.set_ylabel(r"time $t$")
+            self.ax2.set_title(f"{self.names[self.profile_index]}  |  T={T_val:.4f}, c={c_val:.4f}, A={A_val:.3e}")
 
             if self.stability_data is not None:
-                self.spectrum_ax.draw_artist(self.spectrum_ax.patch)
-                self.spectrum_ax.draw_artist(self.spectrum_ax.xaxis)
-                self.spectrum_ax.draw_artist(self.spectrum_ax.yaxis)
-                self.spectrum_ax.draw_artist(self.spectrum_ax.spines["left"])
-                self.spectrum_ax.draw_artist(self.spectrum_ax.spines["bottom"])
-                self.spectrum_ax.draw_artist(self.spectrum_sc)
+                if self.unit_circle_line is None:
+                    th = np.linspace(0, 2 * np.pi, 256)
+                    (self.unit_circle_line,) = self.spectrum_ax.plot(np.cos(th), np.sin(th), "--", color="gray", lw=1.0, zorder=1)
+                else:
+                    self.unit_circle_line.set_visible(True)
+                if f"{sol_index}/floquet" in file:
+                    x, y = get_floquet_multipliers(file, f"{sol_index}/floquet")
+                else:
+                    x, y = [], []
+                self.spectrum_sc.set_offsets(np.c_[x, y])
+                lim = 1.35
+                if len(x) > 0:
+                    lim = max(1.35, 1.15 * float(np.max(np.hypot(x, y))))
+                self.spectrum_ax.set_xlim(-lim, lim)
+                self.spectrum_ax.set_ylim(-lim, lim)
+                self.spectrum_ax.set_aspect("equal", adjustable="box")
+                self.spectrum_ax.set_xlabel(r"$\mathrm{Re}(\mu)$")
+                self.spectrum_ax.set_ylabel(r"$\mathrm{Im}(\mu)$")
+                self.spectrum_ax.spines[["top", "right"]].set_visible(False)
+                self.spectrum_ax.spines[["left", "bottom"]].set_position(("axes", 0.0))
+        else:
+            if self.kymo_im is not None:
+                self.kymo_im.set_visible(False)
+            self.ax2.set_title("")
+            s = int(file["basic_info/nstages"][...][0])
+            self.gauss = 0.5 * (np.polynomial.legendre.leggauss(s)[0] + 1)
+            t = file[f"{sol_index}/t"][...]
+            t = np.append(np.append(t[:-1, None], t[:-1, None] + np.diff(t)[:, None] * self.gauss, axis=1).ravel(), t[-1])
+            if self.actual_spatial_period:
+                t *= file["basic_info/spatial_period"][0] * 2
+                if file["basic_info/pmask"][1] == (file["basic_info/np"][0] - 1):
+                    t *= self.alpha[index] / t[-1]
+                if self.center_wave:
+                    t -= t[-1] * 0.5
+            y = file[f"{sol_index}/state_curr"][self.profile_index :: node][: len(t)]
+            if self.transforms is not None:
+                for t_idx, shift, scale in self.transforms:
+                    if t_idx == self.profile_index:
+                        y = y * scale - shift
+                        break
 
+            self.sol_line.set_data(t, y)
+            self.ax2.relim()
+            self.ax2.autoscale_view(True, True, True)
+            ylabel = self.names[self.profile_index]
+            if self.wave_profile_units is not None:
+                ylabel = f"{ylabel} ({self.wave_profile_units})"
+            self.ax2.set_ylabel(ylabel)
+
+            if self.stability_data is not None:
+                if self.unit_circle_line is not None:
+                    self.unit_circle_line.set_visible(False)
+                self.spectrum_ax.set_aspect("auto")
+                if f"{sol_index}/spectrum" in file:
+                    x, y = get_eigenvalues(file, f"{sol_index}/spectrum")
+                else:
+                    x, y = [], []
+                self.spectrum_sc.set_offsets(np.c_[x, y])
+                self.spectrum_ax.relim()
+                self.spectrum_ax.autoscale_view(True, True, True)
+                self.spectrum_ax.spines[["top", "right"]].set_visible(False)
+                self.spectrum_ax.spines[["left", "bottom"]].set_position("zero")
+
+        if self.initialized:
             for fig in self.figs:
                 if _RENDERING:
-                    fig.canvas.update()
+                    fig.canvas.draw_idle()
                     fig.canvas.flush_events()
             if _RENDERING:
                 plt.pause(1e-4)
@@ -853,6 +996,8 @@ if __name__ == "__main__":
     parser.add_argument("--dispersion-mode", default="default")
     parser.add_argument("--l2", default=False, action="store_true")
     parser.add_argument("--apd", default=False, action="store_true")
+    parser.add_argument("--amplitude", default=False, action="store_true")
+    parser.add_argument("--period", default=False, action="store_true")
     parser.add_argument("--individual", default=False, action="store_true")
     parser.add_argument("--no-stability", default=False, action="store_true")
     parser.add_argument("--apd-value", default=90, type=int)
@@ -886,6 +1031,8 @@ if __name__ == "__main__":
         args.files,
         do_l2_norms=args.l2,
         do_apds=args.apd,
+        do_amplitude=args.amplitude,
+        do_period=args.period,
         apd_value=args.apd_value,
         individual=args.individual,
         no_stability=args.no_stability,

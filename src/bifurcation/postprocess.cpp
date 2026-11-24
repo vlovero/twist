@@ -10,6 +10,7 @@
 #include "indicators/multi_progress.hpp"
 #include "indicators/progress_bar.hpp"
 #include "indicators/setting.hpp"
+#include "modulating/hopf_branch_solver.h"
 #include "serialize.h"
 #include "tools/helpers.h"
 
@@ -669,4 +670,171 @@ void locate_all_branch_points_inplace_new(const std::string &file)
             }
         }
     }
+}
+
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files)
+{
+    using namespace indicators;
+    ProgressBar pbar1{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::PrefixText{ "[floquet] " }, option::ShowPercentage(true), option::ShowElapsedTime(true) };
+    ProgressBar pbar2{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::ShowPercentage(true), option::ShowElapsedTime(true), option::ShowRemainingTime(true) };
+    MultiProgress<ProgressBar, 2> pbars(pbar1, pbar2);
+
+    std::vector<bool> compute_file(files.size(), true);
+    for (size_t i = 0; i < files.size(); i++) {
+        H5::H5File file(files[i], H5F_ACC_RDWR);
+        if (!file.nameExists("0/floquet")) {
+            continue;
+        }
+        fmt::println("The Floquet spectra have already been computed for the file '{}'", files[i]);
+        fflush(stdin);
+        fmt::print("Recompute Floquet spectra? [y/n] ");
+        fflush(stdout);
+        char answer = 'n';
+        if (scanf(" %c", &answer) != 1) {
+            return;
+        }
+        if (answer != 'y' && answer != 'Y') {
+            compute_file[i] = false;
+            continue;
+        }
+        const int nsol = get_number_of_solutions(file);
+        for (int j = 0; j < nsol; j++) {
+            const std::string path = fmt::format("{}/floquet", j);
+            if (file.nameExists(path)) {
+                file.unlink(path);
+            }
+        }
+    }
+
+    pbar1.set_option(option::MaxProgress{ files.size() });
+    for (size_t i = 0; i < files.size(); i++) {
+        pbar1.set_option(option::PostfixText{ fmt::format(" '{}'", files[i]) });
+        if (!compute_file[i]) {
+            pbars.set_progress<0lu>(i + 1);
+            continue;
+        }
+
+        H5::H5File file(files[i], H5F_ACC_RDWR);
+        const int nsol = get_number_of_solutions(file);
+        pbar2.set_option(option::MaxProgress{ (size_t)nsol });
+
+        for (int j = 0; j < nsol; j++) {
+            pbar2.set_option(option::PrefixText{ fmt::format("[soln.{:4d}/{:4d}] ", j, nsol) });
+
+            TWIST::HopfBranchSolver solver;
+            solver.loadFromH5(file, j);
+            TWIST::FloquetSpectrum spec = solver.computeFloquet(12, 24, 1e-10, false);
+
+            H5::Group sol_group = file.openGroup(fmt::format("{}", j));
+            H5::Group fl_group = sol_group.createGroup("floquet");
+            serialize<double, 1>(fl_group, "mu_real", spec.mu_real.data(), { spec.mu_real.size() });
+            serialize<double, 1>(fl_group, "mu_imag", spec.mu_imag.data(), { spec.mu_imag.size() });
+            serialize<int>(fl_group, "n_unstable", spec.n_unstable);
+            serialize<double>(fl_group, "trivial_err", spec.trivial_err);
+            serialize<int, 1>(fl_group, "trivial_idx", spec.trivial_idx, { (hsize_t)2 });
+
+            pbars.set_progress<1lu>((size_t)j + 1);
+        }
+        pbars.set_progress<0lu>(i + 1);
+    }
+    puts("");
+}
+
+void locate_all_floquet_bifurcations_inplace(const std::string &file)
+{
+    H5::H5File h5file(file, H5F_ACC_RDWR);
+    const int nsol = get_number_of_solutions(h5file);
+    if (!h5file.nameExists("0/floquet")) {
+        fmt::println("skipping file '{0}' because no Floquet data was found\n"
+                     "make sure to run `twist postprocess {0} -s` before bifurcation detection",
+            file);
+        return;
+    }
+
+    H5::Group basic = h5file.openGroup("basic_info");
+    int pmask[2] = { 0, 1 };
+    deserialize(basic, "pmask", pmask);
+
+    int prev_nu = 0;
+    {
+        H5::Group fg = h5file.openGroup("0/floquet");
+        deserialize(fg, "n_unstable", prev_nu);
+    }
+
+    int count = 0;
+    for (int k = 1; k < nsol; k++) {
+        H5::Group sol_cur = h5file.openGroup(fmt::format("{}", k));
+        H5::Group fg_cur = sol_cur.openGroup("floquet");
+        H5::Group fg_prev = h5file.openGroup(fmt::format("{}/floquet", k - 1));
+
+        int cur_nu = 0;
+        deserialize(fg_cur, "n_unstable", cur_nu);
+
+        if (cur_nu != prev_nu) {
+            double *mr_cur = nullptr, *mi_cur = nullptr, *mr_prev = nullptr, *mi_prev = nullptr;
+            size_t len_cur = 0, len_prev = 0;
+            int triv_cur[2] = { -1, -1 }, triv_prev[2] = { -1, -1 };
+            deserialize(fg_cur, "mu_real", mr_cur, len_cur);
+            deserialize(fg_cur, "mu_imag", mi_cur, len_cur);
+            deserialize(fg_cur, "trivial_idx", triv_cur);
+            deserialize(fg_prev, "mu_real", mr_prev, len_prev);
+            deserialize(fg_prev, "mu_imag", mi_prev, len_prev);
+            deserialize(fg_prev, "trivial_idx", triv_prev);
+
+            // Identify nontrivial multiplier closest to unit circle |mu|=1 in cur and prev
+            auto find_crossing_mode = [](const double *mr, const double *mi, size_t len, const int triv[2]) {
+                double best_dist = 1e30;
+                std::complex<double> best_mu(1.0, 0.0);
+                for (size_t idx = 0; idx < len; idx++) {
+                    if ((int)idx == triv[0] || (int)idx == triv[1]) continue;
+                    const double mag = std::hypot(mr[idx], mi[idx]);
+                    const double dist = std::abs(mag - 1.0);
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_mu = std::complex<double>(mr[idx], mi[idx]);
+                    }
+                }
+                return best_mu;
+            };
+
+            const std::complex<double> mu_c = find_crossing_mode(mr_cur, mi_cur, len_cur, triv_cur);
+            const std::complex<double> mu_p = find_crossing_mode(mr_prev, mi_prev, len_prev, triv_prev);
+            const std::complex<double> mu_mid = 0.5 * (mu_c + mu_p);
+
+            TWIST::SolutionTypes btype = TWIST::SolutionTypes::foldPeriodic;
+            const char *bname = "Fold (saddle-node of periodic orbits)";
+            if (std::abs(cur_nu - prev_nu) >= 2 || std::abs(mu_mid.imag()) > 1e-4) {
+                btype = TWIST::SolutionTypes::neimarkSacker;
+                bname = "Neimark-Sacker (secondary torus)";
+            }
+            else if (mu_mid.real() < 0.0) {
+                btype = TWIST::SolutionTypes::periodDoubling;
+                bname = "Period-Doubling (flip)";
+            }
+
+            // Do not overwrite index 0 torusPoint; tag the crossing solution k (or k-1 if k-1 is closer and k-1 > 0)
+            const int tag_idx = (k - 1 > 0 && std::abs(std::abs(mu_p) - 1.0) < std::abs(std::abs(mu_c) - 1.0)) ? (k - 1) : k;
+            H5::Group sol_tag = h5file.openGroup(fmt::format("{}", tag_idx));
+            uint64_t existing_st = 0;
+            deserialize(sol_tag, "stype", existing_st);
+            if (existing_st == TWIST::SolutionTypes::regular) {
+                H5::DataSet dset = sol_tag.openDataSet("stype");
+                uint64_t val = (uint64_t)btype;
+                dset.write(&val, H5::PredType::NATIVE_UINT64);
+            }
+
+            double *p_arr = nullptr;
+            deserialize(sol_tag, "p", p_arr);
+            fmt::println("[Floquet] {} near solution {} (param = {:.6e}, n_unstable: {} -> {})", bname, tag_idx, p_arr[pmask[1]], prev_nu, cur_nu);
+            free(p_arr);
+            count++;
+
+            free(mr_cur);
+            free(mi_cur);
+            free(mr_prev);
+            free(mi_prev);
+        }
+        prev_nu = cur_nu;
+    }
+    fmt::println("Detected {} secondary Floquet bifurcation(s) in '{}'", count, file);
 }

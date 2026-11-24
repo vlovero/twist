@@ -7,6 +7,8 @@ struct VisualizeArgs : public argparse::Args
     std::vector<std::string> &files = arg("file", "continuation data file(s)").multi_argument().set_default(std::vector<std::string>{});
     bool &l2 = flag("l2", "Plot the L2 norm on the y-axis instead of wave speed");
     bool &apd = flag("apd", "Plot the APD on the y-axis instead of wave speed");
+    bool &amplitude = flag("amplitude", "Plot oscillation amplitude A on the y-axis for modulating waves");
+    bool &period = flag("period", "Plot modulation period T on the y-axis for modulating waves");
     bool &individual = flag("individual", "Instead of one single figure, plot each subplot in its own figure");
     bool &no_stability = flag("no-stability", "Do not show stability, even if already computed");
     bool &actual_spatial_period = flag("actual-spatial-period", "Use the actual spatial period instead of normalizing it on the x-axis");

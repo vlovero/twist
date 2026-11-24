@@ -1,5 +1,6 @@
 #include "cli/cli_postprocess.h"
 #include "postprocess.h"
+#include "serialize.h"
 #include "tools/helpers.h"
 
 int PostprocessArgs::run()
@@ -32,13 +33,35 @@ int PostprocessArgs::run()
         }
     }
 
-    if (spectrum) {
-        if (use_less_memory) {
-            evaluate_spectrum_for_each_solution_inplace(files, strategy);
+    std::vector<std::string> steady_files;
+    std::vector<std::string> hopf_files;
+    for (const auto &file_name : files) {
+        H5::H5File f(file_name, H5F_ACC_RDONLY);
+        int ftype = TWIST::FileType::continuation;
+        if (f.nameExists("meta_data/file_type")) {
+            H5::Group meta = f.openGroup("meta_data");
+            deserialize(meta, "file_type", ftype);
+        }
+        if (ftype == TWIST::FileType::hopf_continuation) {
+            hopf_files.push_back(file_name);
         }
         else {
-            OpenBLASThreadContext __openblas_context(1);
-            evaluate_spectrum_for_each_solution_inplace_distributed(files, strategy);
+            steady_files.push_back(file_name);
+        }
+    }
+
+    if (spectrum) {
+        if (!steady_files.empty()) {
+            if (use_less_memory) {
+                evaluate_spectrum_for_each_solution_inplace(steady_files, strategy);
+            }
+            else {
+                OpenBLASThreadContext __openblas_context(1);
+                evaluate_spectrum_for_each_solution_inplace_distributed(steady_files, strategy);
+            }
+        }
+        if (!hopf_files.empty()) {
+            evaluate_floquet_for_each_solution_inplace(hopf_files);
         }
     }
 
@@ -49,7 +72,7 @@ int PostprocessArgs::run()
                 which.emplace_back((WhichBifPoints)i);
             }
         }
-        for (const std::string &file : files) {
+        for (const std::string &file : steady_files) {
             TWIST::Collocator collocator_cache(file, 0);
             if (std::find(which.begin(), which.end(), WhichBifPoints::saddle) != which.end()) {
                 locate_all_saddle_nodes_inplace(file, collocator_cache);
@@ -65,6 +88,9 @@ int PostprocessArgs::run()
                 fmt::println("skipping period doubling because it's not implemented correctly");
                 continue;
             }
+        }
+        for (const std::string &file : hopf_files) {
+            locate_all_floquet_bifurcations_inplace(file);
         }
     }
 

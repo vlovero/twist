@@ -5,6 +5,7 @@
 
 #include "cli/cli_build.h"
 #include "cli/cli_continuation.h"
+#include "cli/cli_hopf.h"
 #include "cli/cli_import.h"
 #include "cli/cli_info.h"
 #ifdef TWIST_INCLUDE_LOCAL_CONTINUATION
@@ -29,6 +30,7 @@ struct TWISTArgs : public argparse::Args
     PreprocessArgs &initialize_args = subcommand("initialize");
     SolveArgs &solve_args = subcommand("solve");
     ContinuationArgs &continuation_args = subcommand("continuation");
+    HopfArgs &hopf_args = subcommand("hopf");
     PostprocessArgs &postprocess_args = subcommand("postprocess");
     VisualizeArgs &visualize_args = subcommand("visualize");
     InfoArgs &info_args = subcommand("info");

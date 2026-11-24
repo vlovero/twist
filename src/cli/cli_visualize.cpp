@@ -5,8 +5,8 @@
 int VisualizeArgs::run()
 {
     std::vector<std::string> cmd;
-    if (l2 && apd) {
-        fmt::println("--apd and --l2 are mutually exclusive (only set one)");
+    if ((int)l2 + (int)apd + (int)amplitude + (int)period > 1) {
+        fmt::println("--l2, --apd, --amplitude, and --period are mutually exclusive (only set one)");
         return 1;
     }
     if (!((dispersion_mode == "default") || dispersion_mode.starts_with("multi:") || dispersion_mode.starts_with("cmap:"))) {
@@ -33,6 +33,12 @@ int VisualizeArgs::run()
     }
     if (apd) {
         cmd.emplace_back("--apd");
+    }
+    if (amplitude) {
+        cmd.emplace_back("--amplitude");
+    }
+    if (period) {
+        cmd.emplace_back("--period");
     }
     if (individual) {
         cmd.emplace_back("--individual");

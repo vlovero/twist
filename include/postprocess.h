@@ -16,4 +16,8 @@ void locate_all_saddle_nodes_inplace(const std::string &file, TWIST::Collocator 
 void locate_all_hopf_points_inplace_new(const std::string &file);
 void locate_all_branch_points_inplace_new(const std::string &file);
 
+// Modulating wave (Floquet) postprocessing
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files);
+void locate_all_floquet_bifurcations_inplace(const std::string &file);
+
 #endif // TWIST_POSTPROCESS_H

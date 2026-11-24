@@ -175,6 +175,8 @@ if(BUILD_TESTS)
             test_dggev4
             test_N
             test_twist
+            test_spacetime_dae
+            test_periodic_ks
         )
     else()
         set(WHICH_TESTS $ENV{TWIST_TESTS})
