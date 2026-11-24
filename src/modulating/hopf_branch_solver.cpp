@@ -888,6 +888,27 @@ namespace TWIST
         TWIST_MARK_END("hopf_assemble");
     }
 
+    void HopfBranchSolver::updateCondensedRHSOnly(const double *G)
+    {
+        const double t0 = omp_get_wtime();
+        OpenBLASThreadContext __openblas_context(1);
+#pragma omp parallel for schedule(dynamic, 1)
+        for (size_t n = 0; n < m_nt; n++) {
+            const size_t ns = m_slices[n].n_space;
+            const size_t tid = (size_t)omp_get_thread_num();
+            double *tbuf = m_stage_scratch + tid * m_stage_scratch_stride;
+            double *rhs_tmp = tbuf;
+            double *dk_tmp = &m_dk_rhs_stages[m_stage_offsets[n]];
+            const double *Gn = &G[m_stage_offsets[n]];
+            for (size_t i = 0; i < m_st * ns; i++) {
+                rhs_tmp[i] = -Gn[i];
+            }
+            m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true, 1e-12);
+            memcpy(&m_b_Y[m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
+        }
+        m_timing.t_condense_rhs_p += omp_get_wtime() - t0;
+    }
+
     size_t HopfBranchSolver::defaultWindowCount() const
     {
         if (m_nt <= 4) {
@@ -1592,20 +1613,34 @@ namespace TWIST
         if (verbose) {
             fmt::println("  [HopfNewton] init |R| = {:.4e}, c = {:.6f}, T = {:.6f}, alpha = {:.6f}", norm_res, c, T, alpha);
         }
+        m_last_newton_iters = 0;
         if (norm_res < tol) {
             return true;
         }
 
         double damp = 1.0;
+        double prev_norm_res = norm_res;
+        int chord_count = 0;
+        bool force_full_next = false;
         bool converged = false;
         double *sol_Y = (double *)malloc(m_total_end * sizeof(double));
         double sol_p[3];
 
         for (int iter = 0; iter < max_iter; iter++) {
             m_timing.n_newton_iters++;
-            // Re-assemble & update preconditioner on iter 0 or when convergence slowed / damping occurred
-            const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 3 == 0));
-            assembleCondensedSystem(m_G, update_precond);
+            m_last_newton_iters = iter + 1;
+            const bool use_chord = (!force_full_next && iter >= 2 && damp == 1.0 && norm_res < 0.15 * prev_norm_res && chord_count < 2);
+            if (use_chord) {
+                updateCondensedRHSOnly(m_G);
+                chord_count++;
+            }
+            else {
+                // Re-assemble & update preconditioner on iter 0 or when convergence slowed / damping occurred
+                const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 3 == 0) || force_full_next || chord_count > 0);
+                assembleCondensedSystem(m_G, update_precond);
+                chord_count = 0;
+                force_full_next = false;
+            }
 
             // Eisenstat-Walker forcing
             const double rtol_gmres = std::clamp(0.1 * norm_res, 1e-11, 1e-2);
@@ -1684,6 +1719,11 @@ namespace TWIST
             m_p[0] = c;
             m_p[alpha_idx] = alpha;
             m_T = T;
+            if (use_chord && (damp < 1.0 || norm_trial >= 0.25 * norm_res)) {
+                chord_count = 0;
+                force_full_next = true;
+            }
+            prev_norm_res = norm_res;
             norm_res = norm_trial;
             m_condensed_fresh = false;
             m_last_delta_norm = damp * delta_norm;

@@ -127,6 +127,7 @@ namespace TWIST
         double oscillationAmplitude() const;
         double solutionNormL2() const;
         double tangentAlpha() const { return m_tangent ? m_tangent[m_total_end + 2] : 0.0; }
+        int lastNewtonIters() const { return m_last_newton_iters; }
 
         const SpatialSlice *slices() const { return m_slices; }
         const SparseDenseOutputOp *transfers() const { return m_transfers; }
@@ -158,6 +159,8 @@ namespace TWIST
 
         // Factors condensers, computes condensed RHS `b_Y`, scalar param columns `J_Yp`, and updates preconditioner.
         void assembleCondensedSystem(const double *G, bool update_precond);
+        // Updates only condensed RHS `m_b_Y` and `m_dk_rhs_stages` reusing current factored condensers & `J_Yp`.
+        void updateCondensedRHSOnly(const double *G);
 
         // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES
         // with adaptive M-window exact block condensation.
@@ -250,6 +253,7 @@ namespace TWIST
         size_t m_direct_ipiv_cap = 0;
         mutable size_t m_win_M = 0;
         mutable size_t m_gmres_calls = 0;
+        int m_last_newton_iters = 0;
         bool m_condensed_fresh = false;
         double m_last_delta_norm = 1.0;
 

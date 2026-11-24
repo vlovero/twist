@@ -112,7 +112,13 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
             fmt::println("\n** step change too small **");
             break;
         }
-        ds = std::min(bounds.dsmax, 1.25 * ds);
+        const int nit = solver.lastNewtonIters();
+        if (nit <= 4) {
+            ds = std::min(bounds.dsmax, 1.3 * ds);
+        }
+        else if (nit >= 10) {
+            ds = std::max(bounds.dsmin, 0.75 * ds);
+        }
     }
 
     puts("");
