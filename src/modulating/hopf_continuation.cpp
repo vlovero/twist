@@ -99,7 +99,7 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
         pbar.update(alpha, fmt::format(" | {}={: .5e} | A={:.3e} | T={:.5f} | c={:.5f} | {}x{} | ds={:.2e} |",
             parameter, alpha, amp, solver.period(), solver.waveSpeed(), solver.nt(), solver.maxSpatialNodes(), ds));
 
-        solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::regular, target_h5_path, branch_name, source_index);
+        solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::regular, target_h5_path, branch_name, source_index, amp);
 
         // Check branch reconnection (A -> 0 after moving away from Hopf point)
         if (step > 3 && amp < 1e-8) {

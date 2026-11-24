@@ -27,33 +27,7 @@ namespace TWIST
             const size_t m = slice.node;
             const size_t s = slice.nstages;
             const size_t n_basis = s + 1;
-
-            double nodes[n_basis];
-            nodes[0] = 0.0;
-            for (size_t j = 0; j < s; j++) {
-                nodes[j + 1] = slice.c_c[j];
-            }
-
-            double D_gl[n_basis * n_basis];
-            for (size_t l = 0; l < n_basis; l++) {
-                const double th = nodes[l];
-                for (size_t j = 0; j < n_basis; j++) {
-                    double den = 1.0;
-                    for (size_t q = 0; q < n_basis; q++) {
-                        if (q != j) den *= (nodes[j] - nodes[q]);
-                    }
-                    double num = 0.0;
-                    for (size_t k = 0; k < n_basis; k++) {
-                        if (k == j) continue;
-                        double prod = 1.0;
-                        for (size_t q = 0; q < n_basis; q++) {
-                            if (q != j && q != k) prod *= (th - nodes[q]);
-                        }
-                        num += prod;
-                    }
-                    D_gl[l * n_basis + j] = num / den;
-                }
-            }
+            const double *D_gl = slice.D_gl;
 
             for (size_t k = 0; k < nsub; k++) {
                 const size_t stride_k = k * n_basis * m;
@@ -218,6 +192,8 @@ namespace TWIST
             memcpy(m_g_time, other.m_g_time, m_total_end * sizeof(double));
             memcpy(m_tangent, other.m_tangent, (m_total_end + 3) * sizeof(double));
         }
+        m_condensed_fresh = false;
+        m_last_delta_norm = other.m_last_delta_norm;
 
         return *this;
     }
@@ -260,6 +236,9 @@ namespace TWIST
         if (m_G_trial) { free(m_G_trial); m_G_trial = nullptr; }
         if (m_y_trial) { free(m_y_trial); m_y_trial = nullptr; }
         if (m_delta_stages) { free(m_delta_stages); m_delta_stages = nullptr; }
+        if (m_dk_rhs_stages) { free(m_dk_rhs_stages); m_dk_rhs_stages = nullptr; }
+        if (m_dk_p_stages) { free(m_dk_p_stages); m_dk_p_stages = nullptr; }
+        if (m_prop_stages) { free(m_prop_stages); m_prop_stages = nullptr; }
         if (m_b_Y) { free(m_b_Y); m_b_Y = nullptr; }
         if (m_J_Yp) { free(m_J_Yp); m_J_Yp = nullptr; }
         if (m_Minv_U) { free(m_Minv_U); m_Minv_U = nullptr; }
@@ -316,6 +295,9 @@ namespace TWIST
         m_G_trial = (double *)realloc(m_G_trial, total_stages * sizeof(double));
         m_y_trial = (double *)realloc(m_y_trial, total_stages * sizeof(double));
         m_delta_stages = (double *)realloc(m_delta_stages, total_stages * sizeof(double));
+        m_dk_rhs_stages = (double *)realloc(m_dk_rhs_stages, total_stages * sizeof(double));
+        m_dk_p_stages = (double *)realloc(m_dk_p_stages, 3 * total_stages * sizeof(double));
+        m_prop_stages = (double *)realloc(m_prop_stages, total_stages * sizeof(double));
         m_b_Y = (double *)realloc(m_b_Y, total_end * sizeof(double));
         m_J_Yp = (double *)realloc(m_J_Yp, 3 * total_end * sizeof(double));
         m_Minv_U = (double *)realloc(m_Minv_U, 3 * total_end * sizeof(double));
@@ -334,13 +316,15 @@ namespace TWIST
             max_ns = std::max(max_ns, ns);
         }
         const size_t max_threads = (size_t)std::max(1, omp_get_max_threads());
-        m_stage_scratch_stride = max_ns * (st + 6) + 64;
+        m_stage_scratch_stride = max_ns * (8 * st + 4) + 64;
         const size_t needed_scratch = max_threads * m_stage_scratch_stride;
         if (m_stage_scratch_cap < needed_scratch) {
             m_stage_scratch = (double *)realloc(m_stage_scratch, needed_scratch * sizeof(double));
             m_stage_scratch_cap = needed_scratch;
         }
         m_win_M = 1;
+        m_condensed_fresh = false;
+        m_last_delta_norm = 1.0;
         m_precond.invalidate();
     }
 
@@ -553,10 +537,13 @@ namespace TWIST
                 m_tangent[i] /= t_norm;
             }
         }
+        m_condensed_fresh = false;
+        m_last_delta_norm = 1.0;
     }
 
     void HopfBranchSolver::predict(double ds)
     {
+        m_condensed_fresh = false;
         const RadauDGMethod &rm = getRadauDG(m_st);
         const double *tang_Y = m_tangent;
 
@@ -600,10 +587,16 @@ namespace TWIST
         m_p[m_pmask[1]] = alpha;
         const double sps = m_p[m_np - 1];
 
+        size_t m_trial_nnz = 0;
+        std::vector<int> m_trial_rows(m_node), m_trial_cols(m_node);
+        std::vector<double> m_trial_vals(m_node);
+        if (m_nt > 0) {
+            m_slices[0].buildSparseMass(c, sps, m_trial_nnz, m_trial_rows.data(), m_trial_cols.data(), m_trial_vals.data());
+        }
+
 #pragma omp parallel for schedule(static)
         for (size_t n = 0; n < m_nt; n++) {
-            SpatialSlice slice_local = m_slices[n];
-            slice_local.updateMassMatrices(c, sps);
+            const SpatialSlice &slice_local = m_slices[n];
 
             const size_t ns = slice_local.n_space;
             const size_t prev = (n == 0) ? (m_nt - 1) : (n - 1);
@@ -618,7 +611,6 @@ namespace TWIST
             double *yp_tmp = y_in_cur + ns;
             double *r_sp = yp_tmp + ns; // m_st * ns
             double *mass_tmp = r_sp + m_st * ns;
-            double *mass_work = mass_tmp + ns;
 
             m_transfers[n].apply(y_prev_end, y_in_cur);
 
@@ -635,7 +627,7 @@ namespace TWIST
                 for (size_t i = 0; i < ns; i++) {
                     mass_tmp[i] = yn[j * ns + i] - y_in_cur[i];
                 }
-                slice_local.applyMass(mass_tmp, Gnj, 1.0, 0.0, mass_work);
+                slice_local.applyMassOpSparse(m_trial_nnz, m_trial_rows.data(), m_trial_cols.data(), m_trial_vals.data(), mass_tmp, Gnj, 1.0, 0.0);
                 for (size_t l = 0; l < m_st; l++) {
                     const double scale = -dtau_T * rm.A[j * m_st + l];
                     const double *rl = &r_sp[l * ns];
@@ -728,28 +720,31 @@ namespace TWIST
 
             const size_t tid = (size_t)omp_get_thread_num();
             double *tbuf = m_stage_scratch + tid * m_stage_scratch_stride;
-            //Note: size per_thread is ns*(m_st+6)+64; we need rhs_tmp(m_st*ns) + dk_tmp(m_st*ns) + y_in(ns) + dp_s(ns) + mass_tmp(ns) + mass_work(ns) -> ns*(2*m_st+4)
-            // Let's allocate safely on stack/ensure stage_scratch has (2*m_st+6) in allocateForGrid, OR use m_delta_stages[m_stage_offsets[n]] as dk_tmp!
-            double *rhs_tmp = tbuf; // size m_st * ns
-            double *dk_tmp = &m_delta_stages[m_stage_offsets[n]]; // size m_st * ns (safe disjoint per element n!)
-            double *y_in = rhs_tmp + m_st * ns;
+            const size_t K = (G != nullptr) ? 4 : 3;
+            double *rhs_batch = tbuf;                         // K * m_st * ns
+            double *dk_batch = rhs_batch + K * m_st * ns;     // K * m_st * ns
+            double *y_in = dk_batch + K * m_st * ns;
             double *dp_s = y_in + ns;
             double *mass_tmp = dp_s + ns;
-            double *mass_work = mass_tmp + ns;
 
             m_transfers[n].apply(y_prev_end, y_in);
 
-            // 1. Condensed RHS: b_{Y,n} = [A_n^(-1) (-G_n)]_{st}
-            if (G != nullptr) {
+            size_t col_next = 0;
+            const int col_rhs = (G != nullptr) ? (int)(col_next++) : -1;
+            const size_t col_c = col_next++;
+            const size_t col_T = col_next++;
+            const size_t col_a = col_next++;
+
+            // 1. Condensed RHS: -G_n
+            if (col_rhs >= 0) {
                 const double *Gn = &G[m_stage_offsets[n]];
-                for (size_t i = 0; i < m_st * ns; i++) {
-                    rhs_tmp[i] = -Gn[i];
+                for (size_t l = 0; l < m_st; l++) {
+                    const double *Gnl = &Gn[l * ns];
+                    double *dst = &rhs_batch[(l * K + (size_t)col_rhs) * ns];
+                    for (size_t i = 0; i < ns; i++) {
+                        dst[i] = -Gnl[i];
+                    }
                 }
-                m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true);
-                memcpy(&m_b_Y[m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
-            }
-            else {
-                memset(&m_b_Y[m_end_offsets[n]], 0, ns * sizeof(double));
             }
 
             // 2. Column 0 (c): dG_n/dc
@@ -757,26 +752,24 @@ namespace TWIST
                 for (size_t i = 0; i < ns; i++) {
                     mass_tmp[i] = yn[l * ns + i] - y_in[i];
                 }
-                sl->applyMassDerivC(mass_tmp, &rhs_tmp[l * ns], 1.0, 0.0, mass_work);
+                sl->applyMassDerivC(mass_tmp, &rhs_batch[(l * K + col_c) * ns], 1.0, 0.0, nullptr);
             }
             for (size_t l = 0; l < m_st; l++) {
                 m_condensers[n].evalSpatialParamDeriv(l, &yn[l * ns], m_p, 0, dp_s);
                 for (size_t j = 0; j < m_st; j++) {
                     const double scale = -dtau_T * rm.A[j * m_st + l];
-                    double *rj = &rhs_tmp[j * ns];
+                    double *rj = &rhs_batch[(j * K + col_c) * ns];
                     for (size_t i = 0; i < ns; i++) {
                         rj[i] += scale * dp_s[i];
                     }
                 }
             }
-            m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true);
-            memcpy(&m_J_Yp[0 * m_total_end + m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
 
             // 3. Column 1 (T): dG_n/dT = -dtau_n * sum_l A_{j,l} R_space(Y_{n,l})
-            memset(rhs_tmp, 0, m_st * ns * sizeof(double));
             const double *rn_sp = &m_r_space[m_stage_offsets[n]];
             for (size_t j = 0; j < m_st; j++) {
-                double *rj = &rhs_tmp[j * ns];
+                double *rj = &rhs_batch[(j * K + col_T) * ns];
+                memset(rj, 0, ns * sizeof(double));
                 for (size_t l = 0; l < m_st; l++) {
                     const double scale = -m_dtau[n] * rm.A[j * m_st + l];
                     const double *r_l = &rn_sp[l * ns];
@@ -785,8 +778,6 @@ namespace TWIST
                     }
                 }
             }
-            m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true);
-            memcpy(&m_J_Yp[1 * m_total_end + m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
 
             // 4. Column 2 (alpha): dG_n/dalpha
             if (alpha_is_sps) {
@@ -794,26 +785,46 @@ namespace TWIST
                     for (size_t i = 0; i < ns; i++) {
                         mass_tmp[i] = yn[l * ns + i] - y_in[i];
                     }
-                    sl->applyMassDerivSps(sps, mass_tmp, &rhs_tmp[l * ns], 1.0, 0.0, mass_work);
+                    sl->applyMassDerivSps(sps, mass_tmp, &rhs_batch[(l * K + col_a) * ns], 1.0, 0.0, nullptr);
                 }
             }
             else {
-                memset(rhs_tmp, 0, m_st * ns * sizeof(double));
+                for (size_t l = 0; l < m_st; l++) {
+                    memset(&rhs_batch[(l * K + col_a) * ns], 0, ns * sizeof(double));
+                }
             }
             for (size_t l = 0; l < m_st; l++) {
                 m_condensers[n].evalSpatialParamDeriv(l, &yn[l * ns], m_p, alpha_idx, dp_s);
                 for (size_t j = 0; j < m_st; j++) {
                     const double scale = -dtau_T * rm.A[j * m_st + l];
-                    double *rj = &rhs_tmp[j * ns];
+                    double *rj = &rhs_batch[(j * K + col_a) * ns];
                     for (size_t i = 0; i < ns; i++) {
                         rj[i] += scale * dp_s[i];
                     }
                 }
             }
-            m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true);
-            memcpy(&m_J_Yp[2 * m_total_end + m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
+
+            m_condensers[n].solveLocalStagesBatch(K, rhs_batch, dk_batch, true, 1e-12);
+
+            if (col_rhs >= 0) {
+                for (size_t l = 0; l < m_st; l++) {
+                    memcpy(&m_dk_rhs_stages[m_stage_offsets[n] + l * ns], &dk_batch[(l * K + (size_t)col_rhs) * ns], ns * sizeof(double));
+                }
+                memcpy(&m_b_Y[m_end_offsets[n]], &dk_batch[((m_st - 1) * K + (size_t)col_rhs) * ns], ns * sizeof(double));
+            }
+            else {
+                memset(&m_b_Y[m_end_offsets[n]], 0, ns * sizeof(double));
+            }
+            const size_t p_cols[3] = { col_c, col_T, col_a };
+            for (size_t p = 0; p < 3; p++) {
+                for (size_t l = 0; l < m_st; l++) {
+                    memcpy(&m_dk_p_stages[p * m_total_stages + m_stage_offsets[n] + l * ns], &dk_batch[(l * K + p_cols[p]) * ns], ns * sizeof(double));
+                }
+                memcpy(&m_J_Yp[p * m_total_end + m_end_offsets[n]], &dk_batch[((m_st - 1) * K + p_cols[p]) * ns], ns * sizeof(double));
+            }
             sum_rhs_p += omp_get_wtime() - tf1;
         }
+        m_condensed_fresh = true;
         const double t_loop = omp_get_wtime() - t_loop_start;
         const double sum_tot = sum_factor + sum_rhs_p;
         if (sum_tot > 0.0) {
@@ -860,8 +871,11 @@ namespace TWIST
         TWIST_MARK_END("hopf_assemble");
     }
 
-    int HopfBranchSolver::solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose)
+    int HopfBranchSolver::solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose, double local_rtol, double *out_prop_stages, bool *out_prop_filled)
     {
+        if (out_prop_filled) {
+            *out_prop_filled = false;
+        }
         TWIST_MARK_BEGIN("hopf_gmres");
         const double t_gmres_start = omp_get_wtime();
         omp_set_max_active_levels(1);
@@ -946,7 +960,7 @@ namespace TWIST
                     }
                     for (size_t n = s + 1; n <= e; n++) {
                         const size_t ns_n = m_slices[n].n_space;
-                        m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], nxt.data(), true);
+                        m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], nxt.data(), true, local_rtol);
                         for (size_t i = 0; i < ns_n; i++) {
                             cur[i] = src_Y[m_end_offsets[n] + i] + nxt[i];
                             const double wt = m_weights_end[m_end_offsets[n] + i] * cur[i];
@@ -1163,7 +1177,7 @@ namespace TWIST
                     double lv0 = 0.0, lv1 = 0.0, lv2 = 0.0;
                     for (size_t n = s; n <= e; n++) {
                         const size_t ns_n = m_slices[n].n_space;
-                        m_condensers[n].applyCondensedC(cur, m_transfers[n], nxt, true);
+                        m_condensers[n].applyCondensedC(cur, m_transfers[n], nxt, true, local_rtol);
                         for (size_t i = 0; i < ns_n; i++) {
                             cur[i] = nxt[i];
                             const double wt = m_weights_end[m_end_offsets[n] + i] * cur[i];
@@ -1278,7 +1292,14 @@ namespace TWIST
                 for (size_t n = s; n <= e; n++) {
                     const size_t ns_n = m_slices[n].n_space;
                     double *sn = &sol_Y[m_end_offsets[n]];
-                    m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], sn, true);
+                    if (out_prop_stages != nullptr) {
+                        double *prop_n = &out_prop_stages[m_stage_offsets[n]];
+                        m_condensers[n].applyCondensedCAllStages(cur.data(), m_transfers[n], prop_n, true, local_rtol);
+                        memcpy(sn, &prop_n[(m_st - 1) * ns_n], ns_n * sizeof(double));
+                    }
+                    else {
+                        m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], sn, true, local_rtol);
+                    }
                     const double *rn = &rhs_Y[m_end_offsets[n]];
                     const double *j0 = &m_J_Yp[0 * N_end + m_end_offsets[n]];
                     const double *j1 = &m_J_Yp[1 * N_end + m_end_offsets[n]];
@@ -1288,6 +1309,9 @@ namespace TWIST
                         cur[i] = sn[i];
                     }
                 }
+            }
+            if (out_prop_filled) {
+                *out_prop_filled = (out_prop_stages != nullptr);
             }
             m_timing.t_gmres_reconstruct += omp_get_wtime() - t_rec0;
             m_timing.t_gmres_total += omp_get_wtime() - t_gmres_start;
@@ -1345,7 +1369,7 @@ namespace TWIST
                 const size_t off_prev = m_end_offsets[prev];
                 double *yn_out = &yY[off_n];
 
-                m_condensers[n].applyCondensedC(&xY[off_prev], m_transfers[n], yn_out, true);
+                m_condensers[n].applyCondensedC(&xY[off_prev], m_transfers[n], yn_out, true, local_rtol);
 
                 const double *xn = &xY[off_n];
                 const double *u0 = &m_J_Yp[0 * N_end + off_n];
@@ -1428,7 +1452,6 @@ namespace TWIST
         omp_set_max_active_levels(1);
         OpenBLASThreadContext __openblas_context(1);
 
-        const RadauDGMethod &rm = getRadauDG(m_st);
         double c = m_p[0];
         double T = m_T;
         double alpha = m_p[m_pmask[1]];
@@ -1443,7 +1466,6 @@ namespace TWIST
             fmt::println("  [HopfNewton] init |R| = {:.4e}, c = {:.6f}, T = {:.6f}, alpha = {:.6f}", norm_res, c, T, alpha);
         }
         if (norm_res < tol) {
-            assembleCondensedSystem(nullptr, true);
             return true;
         }
 
@@ -1460,101 +1482,30 @@ namespace TWIST
 
             // Eisenstat-Walker forcing
             const double rtol_gmres = std::clamp(0.1 * norm_res, 1e-11, 1e-2);
+            const double local_rtol = std::clamp(0.01 * rtol_gmres, 1e-12, 1e-7);
             const double neg_Rp[3] = { -Rp[0], -Rp[1], -Rp[2] };
-            const int gmres_iters = solveBorderedGMRES(m_b_Y, neg_Rp, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, rtol_gmres, 200, false);
+            bool prop_filled = false;
+            const int gmres_iters = solveBorderedGMRES(m_b_Y, neg_Rp, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, rtol_gmres, 200, false, local_rtol, m_prop_stages, &prop_filled);
 
-            // Recover full internal stage updates delta_stages in parallel
+            // Recover full internal stage updates delta_stages from cached stage solves + propagator
             const double dc = sol_p[0];
             const double dT = sol_p[1];
             const double dalpha = sol_p[2];
-            const double sps = m_p[m_np - 1];
 
             TWIST_MARK_BEGIN("hopf_stage_recover");
             const double t_sr0 = omp_get_wtime();
+            if (!prop_filled) {
 #pragma omp parallel for schedule(dynamic, 1)
-            for (size_t n = 0; n < m_nt; n++) {
-                const SpatialSlice *sl = &m_slices[n];
-                const size_t ns = sl->n_space;
-                const size_t prev = (n == 0) ? (m_nt - 1) : (n - 1);
-                const size_t prev_ns = m_slices[prev].n_space;
-                const double *yn = &m_y_stages[m_stage_offsets[n]];
-                const double *y_prev_end = &m_y_stages[m_stage_offsets[prev] + (m_st - 1) * prev_ns];
-                const double *Gn = &m_G[m_stage_offsets[n]];
-                const double dtau_T = m_dtau[n] * T;
-
-                const size_t tid = (size_t)omp_get_thread_num();
-                double *tbuf = m_stage_scratch + tid * m_stage_scratch_stride;
-                double *rhs_tmp = tbuf;
-                double *y_in = rhs_tmp + m_st * ns;
-                double *dy_in = y_in + ns;
-                double *dp_s = dy_in + ns;
-                double *mass_tmp = dp_s + ns;
-                double *mass_work = mass_tmp + ns;
-
-                m_transfers[n].apply(y_prev_end, y_in);
-                m_transfers[n].apply(&sol_Y[m_end_offsets[prev]], dy_in);
-
-                sl->applyMass(dy_in, mass_tmp, 1.0, 0.0, mass_work);
-                for (size_t j = 0; j < m_st; j++) {
-                    double *rj = &rhs_tmp[j * ns];
-                    const double *Gnj = &Gn[j * ns];
-                    for (size_t i = 0; i < ns; i++) {
-                        rj[i] = -Gnj[i] + mass_tmp[i];
-                    }
+                for (size_t n = 0; n < m_nt; n++) {
+                    const size_t prev = (n == 0) ? (m_nt - 1) : (n - 1);
+                    m_condensers[n].applyCondensedCAllStages(&sol_Y[m_end_offsets[prev]], m_transfers[n], &m_prop_stages[m_stage_offsets[n]], true, local_rtol);
                 }
-
-                // Subtract dG_n/dc * dc
-                for (size_t l = 0; l < m_st; l++) {
-                    for (size_t i = 0; i < ns; i++) {
-                        mass_tmp[i] = yn[l * ns + i] - y_in[i];
-                    }
-                    sl->applyMassDerivC(mass_tmp, &rhs_tmp[l * ns], -dc, 1.0, mass_work);
-                }
-                for (size_t l = 0; l < m_st; l++) {
-                    m_condensers[n].evalSpatialParamDeriv(l, &yn[l * ns], m_p, 0, dp_s);
-                    for (size_t j = 0; j < m_st; j++) {
-                        const double scale = +dtau_T * rm.A[j * m_st + l] * dc;
-                        double *rj = &rhs_tmp[j * ns];
-                        for (size_t i = 0; i < ns; i++) {
-                            rj[i] += scale * dp_s[i];
-                        }
-                    }
-                }
-
-                // Subtract dG_n/dT * dT
-                const double *rn_sp = &m_r_space[m_stage_offsets[n]];
-                for (size_t j = 0; j < m_st; j++) {
-                    double *rj = &rhs_tmp[j * ns];
-                    for (size_t l = 0; l < m_st; l++) {
-                        const double scale = +m_dtau[n] * rm.A[j * m_st + l] * dT;
-                        const double *r_l = &rn_sp[l * ns];
-                        for (size_t i = 0; i < ns; i++) {
-                            rj[i] += scale * r_l[i];
-                        }
-                    }
-                }
-
-                // Subtract dG_n/dalpha * dalpha
-                if (alpha_is_sps) {
-                    for (size_t l = 0; l < m_st; l++) {
-                        for (size_t i = 0; i < ns; i++) {
-                            mass_tmp[i] = yn[l * ns + i] - y_in[i];
-                        }
-                        sl->applyMassDerivSps(sps, mass_tmp, &rhs_tmp[l * ns], -dalpha, 1.0, mass_work);
-                    }
-                }
-                for (size_t l = 0; l < m_st; l++) {
-                    m_condensers[n].evalSpatialParamDeriv(l, &yn[l * ns], m_p, alpha_idx, dp_s);
-                    for (size_t j = 0; j < m_st; j++) {
-                        const double scale = +dtau_T * rm.A[j * m_st + l] * dalpha;
-                        double *rj = &rhs_tmp[j * ns];
-                        for (size_t i = 0; i < ns; i++) {
-                            rj[i] += scale * dp_s[i];
-                        }
-                    }
-                }
-
-                m_condensers[n].solveLocalStages(rhs_tmp, &m_delta_stages[m_stage_offsets[n]], true);
+            }
+            for (size_t q = 0; q < m_total_stages; q++) {
+                m_delta_stages[q] = m_dk_rhs_stages[q] + m_prop_stages[q]
+                    - dc * m_dk_p_stages[0 * m_total_stages + q]
+                    - dT * m_dk_p_stages[1 * m_total_stages + q]
+                    - dalpha * m_dk_p_stages[2 * m_total_stages + q];
             }
             m_timing.t_stage_recover += omp_get_wtime() - t_sr0;
             TWIST_MARK_END("hopf_stage_recover");
@@ -1607,6 +1558,8 @@ namespace TWIST
             m_p[alpha_idx] = alpha;
             m_T = T;
             norm_res = norm_trial;
+            m_condensed_fresh = false;
+            m_last_delta_norm = damp * delta_norm;
 
             if (verbose) {
                 fmt::println("  [HopfNewton] iter {:2d} | |R|={:.3e} | |dz|={:.3e} | damp={:.3f} | gmres={:3d} | c={:.6f} T={:.6f} alpha={:.6f}",
@@ -1620,9 +1573,6 @@ namespace TWIST
         }
 
         free(sol_Y);
-        if (converged) {
-            assembleCondensedSystem(nullptr, true);
-        }
         return converged;
     }
 
@@ -1632,6 +1582,12 @@ namespace TWIST
         const double t0 = omp_get_wtime();
         const double gmres_before = m_timing.t_gmres_total;
         const double pu_before = m_timing.t_precond_update;
+        const double cf_before = m_timing.t_condense_factor;
+        const double cr_before = m_timing.t_condense_rhs_p;
+        if (!m_condensed_fresh) {
+            const bool need_pc = (m_precond.nt() == 0) || (m_last_delta_norm >= 1e-3);
+            assembleCondensedSystem(nullptr, need_pc);
+        }
         double *sol_Y = (double *)malloc(m_total_end * sizeof(double));
         double *zero_Y = (double *)calloc(m_total_end, sizeof(double));
         double rhs_p[3] = { 0.0, 0.0, 1.0 };
@@ -1668,8 +1624,11 @@ namespace TWIST
 
         free(zero_Y);
         free(sol_Y);
-        const double inner_gmres = (m_timing.t_gmres_total - gmres_before) + (m_timing.t_precond_update - pu_before);
-        const double dt_tang = (omp_get_wtime() - t0) - inner_gmres;
+        const double inner_time = (m_timing.t_gmres_total - gmres_before)
+                                + (m_timing.t_precond_update - pu_before)
+                                + (m_timing.t_condense_factor - cf_before)
+                                + (m_timing.t_condense_rhs_p - cr_before);
+        const double dt_tang = (omp_get_wtime() - t0) - inner_time;
         if (dt_tang > 0.0) m_timing.t_tangent += dt_tang;
         TWIST_MARK_END("hopf_tangent");
     }
@@ -1747,6 +1706,7 @@ namespace TWIST
         m_T = m_T_prev;
         m_p[m_pmask[1]] = m_alpha_prev;
         updateMassMatricesAll();
+        m_condensed_fresh = false;
     }
 
     void HopfBranchSolver::adaptSpaceTimeMesh(const HopfContinuationBounds &bounds, double ds, bool small_change, bool verbose)
@@ -1841,7 +1801,74 @@ namespace TWIST
         std::vector<std::vector<double>> t_space_new(nt_new);
         bool adapt_space = false;
 
-        // First map temporal stages if temporal grid changed; otherwise adapt slices in-place
+        if (!adapt_time) {
+            std::vector<char> need_sp_vec(nt_new, 0);
+#pragma omp parallel for schedule(dynamic, 1)
+            for (size_t n = 0; n < nt_new; n++) {
+                const SpatialSlice &sl = m_slices[n];
+                const size_t ns = sl.n_space;
+                const size_t nsub = sl.nSub();
+                std::vector<double> F_sp(sl.nnodes, 0.0), v_sp(nsub, 0.0), v_max(nsub, 0.0), F_cum(sl.nnodes, 0.0);
+                std::vector<double> mon_work(2 * sl.node * sl.nstages + sl.node + 16);
+
+                double err_exp = 1.0 / (double)(sl.nstages + 1);
+                for (size_t l = 0; l < m_st; l++) {
+                    double th_l = 0.0;
+                    sl.computeMonitorFromState(&m_y_stages[m_stage_offsets[n] + l * ns], F_sp.data(), v_sp.data(), th_l, err_exp, mon_work.data());
+                    for (size_t k = 0; k < nsub; k++) {
+                        v_max[k] = std::max(v_max[k], v_sp[k]);
+                    }
+                }
+
+                F_cum[0] = 0.0;
+                for (size_t k = 0; k < nsub; k++) {
+                    F_cum[k + 1] = F_cum[k] + v_max[k];
+                }
+                const double theta = F_cum[nsub];
+                if (theta > 0.0) {
+                    for (size_t k = 0; k < sl.nnodes; k++) {
+                        F_cum[k] /= theta;
+                    }
+                }
+                size_t n_opt = sl.nnodes;
+                double *t_opt = sl.equidistributeMesh(F_cum.data(), v_max.data(), theta, err_exp, bounds.geps, bounds.min_nodes_adapt, bounds.max_nodes_adapt, n_opt, small_change);
+
+                bool need_sp = (n_opt != sl.nnodes);
+                if (!need_sp) {
+                    double max_dt = 0.0;
+                    for (size_t k = 0; k < sl.nnodes; k++) {
+                        max_dt = std::max(max_dt, std::abs(t_opt[k] - sl.t[k]));
+                    }
+                    if (max_dt > 0.02 / (double)sl.nnodes) {
+                        need_sp = true;
+                    }
+                }
+
+                if (need_sp) {
+                    need_sp_vec[n] = 1;
+                    nnodes_new[n] = n_opt;
+                    t_space_new[n].assign(t_opt, t_opt + n_opt);
+                }
+                else {
+                    nnodes_new[n] = sl.nnodes;
+                    t_space_new[n].assign(sl.t, sl.t + sl.nnodes);
+                }
+                free(t_opt);
+            }
+            for (size_t n = 0; n < nt_new; n++) {
+                if (need_sp_vec[n]) {
+                    adapt_space = true;
+                    break;
+                }
+            }
+            if (!adapt_space) {
+                m_timing.t_adapt += omp_get_wtime() - t0;
+                TWIST_MARK_END("hopf_adapt");
+                return;
+            }
+        }
+
+        // First map temporal stages if temporal grid changed; otherwise snapshot slices & vectors for spatial transfer
         std::vector<SpatialSlice> old_slices(m_nt);
         std::vector<double> old_tau(m_tau, m_tau + m_nt + 1);
         std::vector<size_t> old_stage_off(m_stage_offsets, m_stage_offsets + m_nt + 1);
@@ -1866,13 +1893,13 @@ namespace TWIST
         std::vector<double> inter_tang;
 
         if (!adapt_time) {
-            inter_slices = old_slices;
-            inter_y_stages = old_y_stages;
-            inter_y_ref = old_y_ref;
-            inter_y_prev = old_y_prev;
-            inter_g_sp = old_g_sp;
-            inter_g_tm = old_g_tm;
-            inter_tang = old_tang;
+            inter_slices = std::move(old_slices);
+            inter_y_stages = std::move(old_y_stages);
+            inter_y_ref = std::move(old_y_ref);
+            inter_y_prev = std::move(old_y_prev);
+            inter_g_sp = std::move(old_g_sp);
+            inter_g_tm = std::move(old_g_tm);
+            inter_tang = std::move(old_tang);
         }
         else {
             size_t tot_end = 0;
@@ -1894,6 +1921,8 @@ namespace TWIST
             inter_tang.resize(tot_end + 3);
 
             double w_rad[5];
+            size_t cached_prev_src = (size_t)-1;
+            SparseDenseOutputOp op_prev_cached;
             for (size_t n = 0; n < nt_new; n++) {
                 const size_t ns = inter_slices[n].n_space;
                 const double dt_new = tau_new[n + 1] - tau_new[n];
@@ -1911,9 +1940,11 @@ namespace TWIST
                     const size_t src_prev_ns = old_slices[src_prev].n_space;
 
                     std::vector<double> y0_src(src_ns);
-                    SparseDenseOutputOp op_prev;
-                    op_prev.build(old_slices[src_prev], old_slices[src_el]);
-                    op_prev.apply(&old_y_stages[old_stage_off[src_prev] + (m_st - 1) * src_prev_ns], y0_src.data());
+                    if (cached_prev_src != src_el) {
+                        op_prev_cached.build(old_slices[src_prev], old_slices[src_el]);
+                        cached_prev_src = src_el;
+                    }
+                    op_prev_cached.apply(&old_y_stages[old_stage_off[src_prev] + (m_st - 1) * src_prev_ns], y0_src.data());
 
                     std::vector<double> y_eval_src(src_ns);
                     const double *yn_old = &old_y_stages[old_stage_off[src_el]];
@@ -1957,68 +1988,61 @@ namespace TWIST
             inter_tang[tot_end + 0] = old_tang[m_total_end + 0];
             inter_tang[tot_end + 1] = old_tang[m_total_end + 1];
             inter_tang[tot_end + 2] = old_tang[m_total_end + 2];
-        }
 
-        // Compute spatial monitor per element of inter_slices
-        size_t inter_st_off_cur = 0;
-        for (size_t n = 0; n < nt_new; n++) {
-            const SpatialSlice &sl = inter_slices[n];
-            const size_t ns = sl.n_space;
-            const size_t nsub = sl.nSub();
-            std::vector<double> F_sp(sl.nnodes, 0.0), v_sp(nsub, 0.0), v_max(nsub, 0.0), F_cum(sl.nnodes, 0.0);
-            std::vector<double> mon_work(2 * sl.node * sl.nstages + sl.node + 16);
+            // Compute spatial monitor per element of inter_slices
+            size_t inter_st_off_cur = 0;
+            for (size_t n = 0; n < nt_new; n++) {
+                const SpatialSlice &sl = inter_slices[n];
+                const size_t ns = sl.n_space;
+                const size_t nsub = sl.nSub();
+                std::vector<double> F_sp(sl.nnodes, 0.0), v_sp(nsub, 0.0), v_max(nsub, 0.0), F_cum(sl.nnodes, 0.0);
+                std::vector<double> mon_work(2 * sl.node * sl.nstages + sl.node + 16);
 
-            double err_exp = 1.0 / (double)(sl.nstages + 1);
-            for (size_t l = 0; l < m_st; l++) {
-                double th_l = 0.0;
-                sl.computeMonitorFromState(&inter_y_stages[inter_st_off_cur + l * ns], F_sp.data(), v_sp.data(), th_l, err_exp, mon_work.data());
+                double err_exp = 1.0 / (double)(sl.nstages + 1);
+                for (size_t l = 0; l < m_st; l++) {
+                    double th_l = 0.0;
+                    sl.computeMonitorFromState(&inter_y_stages[inter_st_off_cur + l * ns], F_sp.data(), v_sp.data(), th_l, err_exp, mon_work.data());
+                    for (size_t k = 0; k < nsub; k++) {
+                        v_max[k] = std::max(v_max[k], v_sp[k]);
+                    }
+                }
+                inter_st_off_cur += m_st * ns;
+
+                F_cum[0] = 0.0;
                 for (size_t k = 0; k < nsub; k++) {
-                    v_max[k] = std::max(v_max[k], v_sp[k]);
+                    F_cum[k + 1] = F_cum[k] + v_max[k];
                 }
-            }
-            inter_st_off_cur += m_st * ns;
-
-            F_cum[0] = 0.0;
-            for (size_t k = 0; k < nsub; k++) {
-                F_cum[k + 1] = F_cum[k] + v_max[k];
-            }
-            const double theta = F_cum[nsub];
-            if (theta > 0.0) {
-                for (size_t k = 0; k < sl.nnodes; k++) {
-                    F_cum[k] /= theta;
+                const double theta = F_cum[nsub];
+                if (theta > 0.0) {
+                    for (size_t k = 0; k < sl.nnodes; k++) {
+                        F_cum[k] /= theta;
+                    }
                 }
-            }
-            size_t n_opt = sl.nnodes;
-            double *t_opt = sl.equidistributeMesh(F_cum.data(), v_max.data(), theta, err_exp, bounds.geps, bounds.min_nodes_adapt, bounds.max_nodes_adapt, n_opt, small_change);
+                size_t n_opt = sl.nnodes;
+                double *t_opt = sl.equidistributeMesh(F_cum.data(), v_max.data(), theta, err_exp, bounds.geps, bounds.min_nodes_adapt, bounds.max_nodes_adapt, n_opt, small_change);
 
-            // Check if spatial mesh actually needs updating
-            bool need_sp = (n_opt != sl.nnodes);
-            if (!need_sp) {
-                double max_dt = 0.0;
-                for (size_t k = 0; k < sl.nnodes; k++) {
-                    max_dt = std::max(max_dt, std::abs(t_opt[k] - sl.t[k]));
+                bool need_sp = (n_opt != sl.nnodes);
+                if (!need_sp) {
+                    double max_dt = 0.0;
+                    for (size_t k = 0; k < sl.nnodes; k++) {
+                        max_dt = std::max(max_dt, std::abs(t_opt[k] - sl.t[k]));
+                    }
+                    if (max_dt > 0.02 / (double)sl.nnodes) {
+                        need_sp = true;
+                    }
                 }
-                if (max_dt > 0.02 / (double)sl.nnodes) {
-                    need_sp = true;
+
+                if (need_sp) {
+                    adapt_space = true;
+                    nnodes_new[n] = n_opt;
+                    t_space_new[n].assign(t_opt, t_opt + n_opt);
                 }
+                else {
+                    nnodes_new[n] = sl.nnodes;
+                    t_space_new[n].assign(sl.t, sl.t + sl.nnodes);
+                }
+                free(t_opt);
             }
-
-            if (need_sp) {
-                adapt_space = true;
-                nnodes_new[n] = n_opt;
-                t_space_new[n].assign(t_opt, t_opt + n_opt);
-            }
-            else {
-                nnodes_new[n] = sl.nnodes;
-                t_space_new[n].assign(sl.t, sl.t + sl.nnodes);
-            }
-            free(t_opt);
-        }
-
-        if (!adapt_time && !adapt_space) {
-            m_timing.t_adapt += omp_get_wtime() - t0;
-            TWIST_MARK_END("hopf_adapt");
-            return;
         }
 
         if (verbose) {
@@ -2093,27 +2117,34 @@ namespace TWIST
         // Compute L2 deviation from time average on reference mesh slices[0]
         const SpatialSlice &ref = m_slices[0];
         const size_t ns = ref.n_space;
-        std::vector<double> y_mean(ns, 0.0), y_tmp(ns);
+        std::vector<double> y_mapped(m_nt * ns);
+        std::vector<double> y_mean(ns, 0.0);
         std::vector<double> w0(ns);
         ref.fillQuadratureWeights(w0.data(), false);
 
         for (size_t n = 0; n < m_nt; n++) {
-            SparseDenseOutputOp op;
-            op.build(m_slices[n], ref);
-            op.apply(&m_y_stages[m_stage_offsets[n] + (m_st - 1) * m_slices[n].n_space], y_tmp.data());
+            const double *src = &m_y_stages[m_stage_offsets[n] + (m_st - 1) * m_slices[n].n_space];
+            double *dst = &y_mapped[n * ns];
+            if (n == 0) {
+                memcpy(dst, src, ns * sizeof(double));
+            }
+            else {
+                SparseDenseOutputOp op;
+                op.build(m_slices[n], ref);
+                op.apply(src, dst);
+            }
+            const double dt = m_dtau[n];
             for (size_t i = 0; i < ns; i++) {
-                y_mean[i] += m_dtau[n] * y_tmp[i];
+                y_mean[i] += dt * dst[i];
             }
         }
 
         double amp2 = 0.0;
         for (size_t n = 0; n < m_nt; n++) {
-            SparseDenseOutputOp op;
-            op.build(m_slices[n], ref);
-            op.apply(&m_y_stages[m_stage_offsets[n] + (m_st - 1) * m_slices[n].n_space], y_tmp.data());
+            const double *ym = &y_mapped[n * ns];
             double slice_l2 = 0.0;
             for (size_t i = 0; i < ns; i++) {
-                const double diff = y_tmp[i] - y_mean[i];
+                const double diff = ym[i] - y_mean[i];
                 slice_l2 += w0[i] * diff * diff;
             }
             amp2 += m_dtau[n] * slice_l2;
@@ -2157,7 +2188,7 @@ namespace TWIST
         m_serialization_index = index;
     }
 
-    void HopfBranchSolver::serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, SolutionTypes stype, const std::string &target_h5_path, const std::string &branch_name, int source_index)
+    void HopfBranchSolver::serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, SolutionTypes stype, const std::string &target_h5_path, const std::string &branch_name, int source_index, double precomputed_amp)
     {
         TWIST_MARK_BEGIN("hopf_serialize");
         const double t0 = omp_get_wtime();
@@ -2231,7 +2262,7 @@ namespace TWIST
         H5::Group group = m_serialization_root.createGroup(fmt::format("{}", m_serialization_index));
         m_serialization_index++;
 
-        const double amp = oscillationAmplitude();
+        const double amp = (precomputed_amp >= 0.0) ? precomputed_amp : oscillationAmplitude();
         const double l2 = solutionNormL2();
 
         ::serialize<double, 1>(group, "p", m_p, { (hsize_t)m_np });
@@ -2253,29 +2284,57 @@ namespace TWIST
             ::serialize<double, 1>(el, "y_stages", &m_y_stages[m_stage_offsets[n]], { (hsize_t)(m_st * ns) });
         }
 
-        // Build lightweight resampled kymograph (nt + 1) x nx_kymo x node on uniform spatial grid
+        // Build lightweight resampled kymograph (nt + 1) x nx_kymo x node on uniform spatial grid via 1D Lagrange evaluation
         constexpr size_t nx_kymo = 96;
-        std::vector<double> t_unif(nx_kymo);
-        for (size_t j = 0; j < nx_kymo; j++) {
-            t_unif[j] = (double)j / (double)(nx_kymo - 1);
-        }
-        SpatialSlice kymo_slice;
-        kymo_slice.init(m_spatial_nstages, m_node, nx_kymo, t_unif.data(), m_func, m_fjac, m_pjac, m_diffusion, m_unscaled_spatial_period);
-        //Wait: kymo_slice has (nx_kymo - 1)*(s+1)+1 points; we just want values at t_unif (the nx_kymo grid nodes)!
         std::vector<double> kymo((m_nt + 1) * nx_kymo * m_node);
-        std::vector<double> kymo_full(kymo_slice.n_space);
         const size_t n_basis = m_spatial_nstages + 1;
-        for (size_t n = 0; n <= m_nt; n++) {
-            const size_t el_idx = (n == 0) ? (m_nt - 1) : (n - 1);
-            const size_t ns_el = m_slices[el_idx].n_space;
-            SparseDenseOutputOp op;
-            op.build(m_slices[el_idx], kymo_slice);
-            op.apply(&m_y_stages[m_stage_offsets[el_idx] + (m_st - 1) * ns_el], kymo_full.data());
+        double nodes[16];
+        nodes[0] = 0.0;
+        for (size_t j = 0; j < m_spatial_nstages; j++) {
+            nodes[j + 1] = m_slices[0].c_c[j];
+        }
+        double weights_l[16];
+        for (size_t n = 1; n <= m_nt; n++) {
+            const size_t el_idx = n - 1;
+            const SpatialSlice &sl = m_slices[el_idx];
+            const size_t ns_el = sl.n_space;
+            const size_t nsub = sl.nSub();
+            const double *y_end = &m_y_stages[m_stage_offsets[el_idx] + (m_st - 1) * ns_el];
+            double *krow = &kymo[n * nx_kymo * m_node];
+
+            size_t k = 0;
             for (size_t j = 0; j < nx_kymo; j++) {
-                const size_t src_idx = (j == nx_kymo - 1) ? ((nx_kymo - 1) * n_basis) : (j * n_basis);
-                memcpy(&kymo[(n * nx_kymo + j) * m_node], &kymo_full[src_idx * m_node], m_node * sizeof(double));
+                const double xi = (double)j / (double)(nx_kymo - 1);
+                if (j == nx_kymo - 1) {
+                    memcpy(&krow[j * m_node], &y_end[nsub * n_basis * m_node], m_node * sizeof(double));
+                    continue;
+                }
+                while (k + 1 < nsub && xi > sl.t[k + 1]) {
+                    k++;
+                }
+                const double th = (xi - sl.t[k]) / sl.h[k];
+                for (size_t l = 0; l < n_basis; l++) {
+                    double w = 1.0;
+                    for (size_t q = 0; q < n_basis; q++) {
+                        if (q != l) {
+                            w *= (th - nodes[q]) / (nodes[l] - nodes[q]);
+                        }
+                    }
+                    weights_l[l] = w;
+                }
+                double *out = &krow[j * m_node];
+                memset(out, 0, m_node * sizeof(double));
+                const size_t stride_k = k * n_basis * m_node;
+                for (size_t l = 0; l < n_basis; l++) {
+                    const double wl = weights_l[l];
+                    const double *src = &y_end[stride_k + l * m_node];
+                    for (size_t d = 0; d < m_node; d++) {
+                        out[d] += wl * src[d];
+                    }
+                }
             }
         }
+        memcpy(kymo.data(), &kymo[m_nt * nx_kymo * m_node], nx_kymo * m_node * sizeof(double));
         ::serialize<double, 3>(group, "kymograph", kymo.data(), { (hsize_t)(m_nt + 1), (hsize_t)nx_kymo, (hsize_t)m_node });
         m_serialization_file.flush(H5F_SCOPE_GLOBAL);
         const double dt_ser = (omp_get_wtime() - t0) - (m_timing.t_amp - amp_before);
@@ -2386,5 +2445,7 @@ namespace TWIST
         updatePhaseConditions();
         memset(m_tangent, 0, (m_total_end + 3) * sizeof(double));
         m_tangent[m_total_end + 2] = 1.0;
+        m_condensed_fresh = false;
+        m_last_delta_norm = 1.0;
     }
 } // namespace TWIST

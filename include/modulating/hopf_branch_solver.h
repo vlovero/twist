@@ -106,7 +106,7 @@ namespace TWIST
         FloquetSpectrum computeFloquet(size_t neig = 12, size_t nsub = 24, double tol = 1e-10, bool verbose = false);
 
         // Serializes current solution step to HDF5 (creates standalone file or unified /hopf_branches/<branch_name> group on first call).
-        void serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix = ".cache/continuation_data", SolutionTypes stype = SolutionTypes::regular, const std::string &target_h5_path = "", const std::string &branch_name = "", int source_index = -1);
+        void serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix = ".cache/continuation_data", SolutionTypes stype = SolutionTypes::regular, const std::string &target_h5_path = "", const std::string &branch_name = "", int source_index = -1, double precomputed_amp = -1.0);
 
         void setSerializationFileAndIndex(H5::H5File &file, int index);
         void setSerializationTarget(H5::H5File &file, const std::string &branch_group_path, int index);
@@ -161,7 +161,7 @@ namespace TWIST
 
         // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES
         // with adaptive M-window exact block condensation.
-        int solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose);
+        int solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose, double local_rtol = 1e-12, double *out_prop_stages = nullptr, bool *out_prop_filled = nullptr);
 
         // Weighted L2 inner product on endpoint space (length m_total_end)
         double endpointDot(const double *a, const double *b) const;
@@ -224,6 +224,9 @@ namespace TWIST
         double *m_G_trial = nullptr;       // m_total_stages
         double *m_y_trial = nullptr;       // m_total_stages
         double *m_delta_stages = nullptr;  // m_total_stages
+        double *m_dk_rhs_stages = nullptr; // m_total_stages (cached A_n^(-1)(-G_n))
+        double *m_dk_p_stages = nullptr;   // 3 * m_total_stages (cached A_n^(-1)(dG/dp))
+        double *m_prop_stages = nullptr;   // m_total_stages (cached propagator stages)
         double *m_b_Y = nullptr;           // m_total_end
         double *m_J_Yp = nullptr;          // 3 * m_total_end (columns for c, T, alpha)
         double *m_Minv_U = nullptr;        // 3 * m_total_end (P_ST^(-1) * J_Yp)
@@ -236,6 +239,8 @@ namespace TWIST
         size_t m_stage_scratch_cap = 0;
         size_t m_stage_scratch_stride = 0;
         mutable size_t m_win_M = 1;
+        bool m_condensed_fresh = false;
+        double m_last_delta_norm = 1.0;
 
         // HDF5 serialization state
         int m_serialization_index = -1;
