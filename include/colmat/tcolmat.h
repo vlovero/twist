@@ -1807,6 +1807,108 @@ namespace DEV
                 m_info.clearFactored();
             }
 
+            void copyPartitionsFrom(const CollocationMatrix<double> &src, BoundaryConditionsBlocks<data_t> *bc)
+            {
+                ptrdiff_t i;
+                const ptrdiff_t nblocks = src.m_nblocks;
+                const ptrdiff_t node = src.m_partitions->node;
+                const ptrdiff_t ncol = (src.m_partitions->bsize / node) - 1;
+                const ptrdiff_t nparam = src.m_partitions->nparam;
+                const ptrdiff_t bsize = src.m_partitions->bsize;
+                const ptrdiff_t A_len = bsize * (bsize + node);
+
+                if ((nblocks != m_nblocks) || (m_partitions == nullptr) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (nparam != m_partitions->nparam)) {
+                    if (m_cap < nblocks) {
+                        m_partitions = (Partition<data_t> *)realloc(m_partitions, nblocks * sizeof(Partition<data_t>));
+                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
+                        for (i = m_cap; i < nblocks; i++) {
+                            m_partitions[i] = std::move(Partition<data_t>());
+                            m_partitions_mm[i] = std::move(Partition<data_t>());
+                        }
+                        m_cap = nblocks;
+                    }
+                    m_nblocks = nblocks;
+                    for (i = 0; i < nblocks; i++) {
+                        m_partitions[i].emptyPartition(ncol, node, nparam);
+                        m_partitions_mm[i].emptyPartition(ncol, node, nparam);
+                    }
+                    m_prows = (data_t *)realloc(m_prows, nparam * (nblocks * node * (ncol + 1) + node) * sizeof(data_t));
+                    m_D = (data_t *)realloc(m_D, nparam * nparam * sizeof(data_t));
+                    m_V_mm = (data_t *)realloc(m_V_mm, nparam * size() * sizeof(data_t));
+                    resizeWork();
+                }
+
+                m_bc = bc;
+                if (nparam != 0) {
+                    const ptrdiff_t prow_len = (size() - nparam) * nparam;
+                    for (i = 0; i < prow_len; i++) {
+                        m_prows[i] = (data_t)src.m_V_mm[i];
+                    }
+                    for (i = 0; i < nparam * nparam; i++) {
+                        m_D[i] = (data_t)src.m_V_mm[prow_len + i];
+                    }
+                    for (i = 0; i < size() * nparam; i++) {
+                        m_V_mm[i] = (data_t)src.m_V_mm[i];
+                    }
+                }
+
+                for (i = 0; i < m_nblocks; i++) {
+                    if constexpr (std::is_same_v<data_t, double>) {
+                        memcpy(m_partitions[i].A, src.m_partitions_mm[i].A, A_len * sizeof(double));
+                    }
+                    else {
+                        const double *srcA = src.m_partitions_mm[i].A;
+                        data_t *dstA = m_partitions[i].A;
+                        for (ptrdiff_t q = 0; q < A_len; q++) {
+                            dstA[q] = data_t(srcA[q], 0.0);
+                        }
+                    }
+                    m_partitions_mm[i].fill(m_partitions[i]);
+                }
+
+                m_info.clearFactored();
+            }
+
+            void addMassBlock(const double *M, const double *A_rk, const double *b_rk, const double *h, const data_t scale)
+            {
+                ptrdiff_t block_idx, i, j, k, l;
+                const ptrdiff_t node = m_partitions->node;
+                const ptrdiff_t nstages = (m_partitions->bsize / node) - 1;
+                const ptrdiff_t ldblock = m_partitions->ldA();
+
+                for (block_idx = 0; block_idx < m_nblocks; block_idx++) {
+                    const data_t mu = scale * h[block_idx];
+                    data_t *A_blk = m_partitions[block_idx].A;
+                    data_t *Amm_blk = m_partitions_mm[block_idx].A;
+
+                    for (i = 0; i < nstages; i++) {
+                        for (j = 0; j < node; j++) {
+                            for (k = 0; k < node; k++) {
+                                const data_t val = mu * b_rk[i] * M[j * node + k];
+                                const ptrdiff_t idx = ((i + 1) * node + j) * ldblock + k;
+                                A_blk[idx] += val;
+                                Amm_blk[idx] += val;
+                            }
+                        }
+                    }
+                    for (i = 0; i < nstages; i++) {
+                        for (j = 0; j < nstages; j++) {
+                            const data_t a_ji = mu * A_rk[j * nstages + i];
+                            for (k = 0; k < node; k++) {
+                                for (l = 0; l < node; l++) {
+                                    const data_t val = a_ji * M[k * node + l];
+                                    const ptrdiff_t idx = ((i + 1) * node + k) * ldblock + (j + 1) * node + l;
+                                    A_blk[idx] += val;
+                                    Amm_blk[idx] += val;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                m_info.clearFactored();
+            }
+
             void factor()
             {
                 TWIST_CXX_MARK_FUNCTION;

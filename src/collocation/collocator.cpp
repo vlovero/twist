@@ -1834,7 +1834,7 @@ namespace TWIST
         }
     }
 
-    bool Collocator::locateTorusPoint(ContinuationBounds &bounds, std::vector<std::complex<double>> &unstable_modes, const ptrdiff_t index)
+    bool Collocator::locateTorusPoint(ContinuationBounds &bounds, std::vector<std::complex<double>> &unstable_modes, const ptrdiff_t index, double *out_omega, std::complex<double> *out_psi, size_t *out_psi_len)
     {
         // TODO: clean up code by moving the lambda expressions into the Hopf namespace
         // where all of the old routines live
@@ -1913,6 +1913,19 @@ namespace TWIST
         // puts("");
         if (converged) {
             unstable_modes[index] = k;
+            if (out_omega != nullptr) {
+                *out_omega = std::abs(k.imag());
+            }
+            if (out_psi != nullptr) {
+                const size_t ncopy = (out_psi_len != nullptr) ? std::min(*out_psi_len, v.size()) : v.size();
+                const bool conj_v = (k.imag() < 0.0);
+                for (size_t idx = 0; idx < ncopy; idx++) {
+                    out_psi[idx] = conj_v ? std::conj(v[idx]) : v[idx];
+                }
+            }
+            if (out_psi_len != nullptr) {
+                *out_psi_len = v.size();
+            }
             fmt::println("error = {: .8e}", std::abs(k.real()));
             fmt::println("omega = {: .8e}", k.imag());
             fmt::println("alpha = {: .8e}", m_p[m_pmask[1]]);
@@ -2935,6 +2948,51 @@ namespace TWIST
     const T *Collocator::p() const
     {
         return m_p;
+    }
+
+    const int *Collocator::pmask() const
+    {
+        return m_pmask;
+    }
+
+    func_t Collocator::func() const
+    {
+        return m_func;
+    }
+
+    func_t Collocator::fjac() const
+    {
+        return m_fjac;
+    }
+
+    pjac_t Collocator::pjac() const
+    {
+        return m_pjac;
+    }
+
+    const T *Collocator::colA() const
+    {
+        return c_A;
+    }
+
+    const T *Collocator::colB() const
+    {
+        return c_b;
+    }
+
+    const T *Collocator::colC() const
+    {
+        return c_c;
+    }
+
+    const T *Collocator::colP() const
+    {
+        return c_P;
+    }
+
+    const T *Collocator::colChat() const
+    {
+        return c_chat;
     }
 
     size_t Collocator::getNParam() const

@@ -424,7 +424,7 @@ void locate_all_hopf_points_inplace_new(const std::string &file)
     int npairs1, npairs2, nunstable1, nunstable2, count;
     double parmin, parmax, tmp1, tmp2;
     double *alphar = nullptr, *alphai = nullptr, *beta = nullptr;
-    std::vector<std::tuple<size_t, double, TWIST::Collocator>> all_computed;
+    std::vector<std::tuple<size_t, double, std::vector<std::complex<double>>, TWIST::Collocator>> all_computed;
     std::vector<std::complex<double>> unstable1, unstable2;
 
     // the min and max nodes won't be used in the solver so set them to whatever
@@ -500,11 +500,15 @@ void locate_all_hopf_points_inplace_new(const std::string &file)
                 for (j = 0; j < unstable1.size(); j += 2) {
                     TWIST::Collocator collocator(solution_data, i);
                     bounds.ds = 1e-3;
-                    converged = collocator.locateTorusPoint(bounds, unstable1, j);
+                    double omega_refined = 0.0;
+                    size_t psi_len = collocator.NUnknowns();
+                    std::vector<std::complex<double>> psi_buf(psi_len);
+                    converged = collocator.locateTorusPoint(bounds, unstable1, j, &omega_refined, psi_buf.data(), &psi_len);
                     if (converged) {
                         if (is_between(collocator.getContinuationParameterValue(), parmin, parmax)) {
                             count++;
-                            all_computed.push_back({ i, unstable1[j].imag(), collocator });
+                            psi_buf.resize(psi_len);
+                            all_computed.push_back({ i, omega_refined, std::move(psi_buf), collocator });
                         }
                     }
                     if ((npairs1 - npairs2) <= count) {
@@ -516,11 +520,15 @@ void locate_all_hopf_points_inplace_new(const std::string &file)
                 for (j = 0; j < unstable2.size(); j += 2) {
                     TWIST::Collocator collocator(solution_data, i - 1);
                     bounds.ds = 1e-3;
-                    converged = collocator.locateTorusPoint(bounds, unstable2, j);
+                    double omega_refined = 0.0;
+                    size_t psi_len = collocator.NUnknowns();
+                    std::vector<std::complex<double>> psi_buf(psi_len);
+                    converged = collocator.locateTorusPoint(bounds, unstable2, j, &omega_refined, psi_buf.data(), &psi_len);
                     if (converged) {
                         if (is_between(collocator.getContinuationParameterValue(), parmin, parmax)) {
                             count++;
-                            all_computed.push_back({ i, unstable2[j].imag(), collocator });
+                            psi_buf.resize(psi_len);
+                            all_computed.push_back({ i, omega_refined, std::move(psi_buf), collocator });
                         }
                     }
                     if ((npairs2 - npairs1) <= count) {
@@ -530,14 +538,24 @@ void locate_all_hopf_points_inplace_new(const std::string &file)
             }
 
             // don't insert yet, sort based on parameter value, reverse if needed, then insert
-            std::sort(all_computed.begin(), all_computed.end(), [](const auto &a, const auto &b) { return std::get<2>(a).getContinuationParameterValue() < std::get<2>(b).getContinuationParameterValue(); });
+            std::sort(all_computed.begin(), all_computed.end(), [](const auto &a, const auto &b) { return std::get<3>(a).getContinuationParameterValue() < std::get<3>(b).getContinuationParameterValue(); });
             tmp1 = collocator1.getContinuationParameterValue();
             tmp2 = collocator2.getContinuationParameterValue();
             if (tmp2 > tmp1) {
                 std::reverse(all_computed.begin(), all_computed.end());
             }
-            for (auto &[_1, _2, collocator] : all_computed) {
+            for (auto &[_1, omega_val, psi_vec, collocator] : all_computed) {
                 insert_solution_at_index(solution_data, i, nsolutions, collocator, TWIST::SolutionTypes::torusPoint);
+                H5::Group sol_group = solution_data.openGroup(fmt::format("{}", i));
+                H5::Group hopf_group = sol_group.createGroup("hopf_info");
+                std::vector<double> psi_real(psi_vec.size()), psi_imag(psi_vec.size());
+                for (size_t q = 0; q < psi_vec.size(); q++) {
+                    psi_real[q] = psi_vec[q].real();
+                    psi_imag[q] = psi_vec[q].imag();
+                }
+                serialize<double>(hopf_group, "omega", omega_val);
+                serialize<double, 1>(hopf_group, "psi_real", psi_real.data(), { psi_real.size() });
+                serialize<double, 1>(hopf_group, "psi_imag", psi_imag.data(), { psi_imag.size() });
                 nsolutions++;
                 i++;
             }

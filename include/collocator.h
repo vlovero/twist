@@ -135,6 +135,15 @@ namespace TWIST
         void generateNullspace();
         T *p();
         const T *p() const;
+        const int *pmask() const;
+        func_t func() const;
+        func_t fjac() const;
+        pjac_t pjac() const;
+        const T *colA() const;
+        const T *colB() const;
+        const T *colC() const;
+        const T *colP() const;
+        const T *colChat() const;
         size_t getNParam() const;
         T *t();
         T *y();
@@ -163,7 +172,7 @@ namespace TWIST
         void setSerializationFileAndIndex(H5::H5File &file, const int index);
 
         bool locateSaddleNode();
-        bool locateTorusPoint(ContinuationBounds &bounds, std::vector<std::complex<double>> &unstable_modes, const ptrdiff_t index);
+        bool locateTorusPoint(ContinuationBounds &bounds, std::vector<std::complex<double>> &unstable_modes, const ptrdiff_t index, double *out_omega = nullptr, std::complex<double> *out_psi = nullptr, size_t *out_psi_len = nullptr);
         bool locateBranchPoint(double &k);
         void generateJacobianColmat(DEV::Matrix *colmat, const RP(T) Y, const RP(T) Yold, const RP(T) Ypold, const RP(T) p, RP(T) work, RP(T) v);
         void generateEssentialSpectrumBranch(const std::complex<double> lambda0, std::vector<std::complex<double>> &results);
