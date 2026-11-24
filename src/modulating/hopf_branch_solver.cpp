@@ -114,6 +114,7 @@ namespace TWIST
         m_c_prev = other.m_c_prev;
         m_T = other.m_T;
         m_T_prev = other.m_T_prev;
+        m_T_scale = other.m_T_scale;
         m_alpha_prev = other.m_alpha_prev;
         m_serialization_index = other.m_serialization_index;
         m_serialization_file = other.m_serialization_file;
@@ -245,7 +246,7 @@ namespace TWIST
         m_bord_rhs = (double *)realloc(m_bord_rhs, (total_end + 3) * sizeof(double));
         m_bord_sol = (double *)realloc(m_bord_sol, (total_end + 3) * sizeof(double));
 
-        const size_t needed_gmres = Krylov::gmres_lwork(total_end + 3, 40);
+        const size_t needed_gmres = Krylov::gmres_lwork(total_end + 3, 100);
         if (m_gmres_work_cap < needed_gmres) {
             m_gmres_work = (double *)realloc(m_gmres_work, needed_gmres * sizeof(double));
             m_gmres_work_cap = needed_gmres;
@@ -281,8 +282,9 @@ namespace TWIST
         m_total_end = m_end_offsets[m_nt];
         m_total_stages = m_stage_offsets[m_nt];
         memcpy(m_weights_bord, m_weights_end, m_total_end * sizeof(double));
+        const double w_T = 1.0 / (m_T_scale * m_T_scale);
         m_weights_bord[m_total_end + 0] = 1.0;
-        m_weights_bord[m_total_end + 1] = 1.0;
+        m_weights_bord[m_total_end + 1] = w_T;
         m_weights_bord[m_total_end + 2] = 1.0;
     }
 
@@ -329,9 +331,9 @@ namespace TWIST
     double HopfBranchSolver::borderedDot(const double *a, const double *b) const
     {
         double acc = endpointDot(a, b);
-        acc += a[m_total_end + 0] * b[m_total_end + 0];
-        acc += a[m_total_end + 1] * b[m_total_end + 1];
-        acc += a[m_total_end + 2] * b[m_total_end + 2];
+        acc += m_weights_bord[m_total_end + 0] * a[m_total_end + 0] * b[m_total_end + 0];
+        acc += m_weights_bord[m_total_end + 1] * a[m_total_end + 1] * b[m_total_end + 1];
+        acc += m_weights_bord[m_total_end + 2] * a[m_total_end + 2] * b[m_total_end + 2];
         return acc;
     }
 
@@ -372,6 +374,7 @@ namespace TWIST
         m_T = (2.0 * M_PI) / std::abs(omega);
         m_c_prev = m_p[0];
         m_T_prev = m_T;
+        m_T_scale = std::max(1.0, m_T);
         m_alpha_prev = m_p[m_pmask[1]];
 
         std::vector<size_t> nn(nt, hopf_col.getNNodes());
@@ -582,9 +585,9 @@ namespace TWIST
                 arclen += w * tang_n[i] * dprev;
             }
         }
-        arclen += m_tangent[m_total_end + 0] * (c - m_c_prev)
-                + m_tangent[m_total_end + 1] * (T - m_T_prev)
-                + m_tangent[m_total_end + 2] * (alpha - m_alpha_prev) - ds;
+        arclen += m_weights_bord[m_total_end + 0] * m_tangent[m_total_end + 0] * (c - m_c_prev)
+                + m_weights_bord[m_total_end + 1] * m_tangent[m_total_end + 1] * (T - m_T_prev)
+                + m_weights_bord[m_total_end + 2] * m_tangent[m_total_end + 2] * (alpha - m_alpha_prev) - ds;
 
         Rp_out[0] = psi_sp;
         Rp_out[1] = psi_tm;
@@ -721,24 +724,356 @@ namespace TWIST
         }
 
         if (update_precond) {
+            const size_t M = chooseWindowCount();
             double *y_end = m_bord_sol; // temporary use before GMRES
             syncEndpointsFromStages(y_end);
-            m_precond.update(m_nt, m_slices, m_condensers, y_end, m_dtau, m_T, m_p, 1.0);
+            if (M == m_nt) {
+                m_precond.update(m_nt, m_slices, m_condensers, y_end, m_dtau, m_T, m_p, 1.0);
+            }
+            else if (M >= 2) {
+                std::vector<SpatialSlice> win_slices(M);
+                std::vector<double> win_dtau(M, 0.0);
+                size_t W_end = 0;
+                for (size_t w = 0; w < M; w++) {
+                    const size_t ws = (w * m_nt) / M;
+                    const size_t we = ((w + 1) * m_nt) / M;
+                    const size_t e = we - 1;
+                    win_slices[w] = m_slices[e];
+                    W_end += m_slices[e].n_space;
+                    for (size_t n = ws; n < we; n++) {
+                        win_dtau[w] += m_dtau[n];
+                    }
+                }
+                std::vector<double> win_y_end(W_end);
+                size_t woff = 0;
+                for (size_t w = 0; w < M; w++) {
+                    const size_t e = ((w + 1) * m_nt) / M - 1;
+                    const size_t ns_e = m_slices[e].n_space;
+                    memcpy(&win_y_end[woff], &y_end[m_end_offsets[e]], ns_e * sizeof(double));
+                    woff += ns_e;
+                }
+                m_precond.update(M, win_slices.data(), nullptr, win_y_end.data(), win_dtau.data(), m_T, m_p, 1.0);
+            }
         }
+    }
+
+    size_t HopfBranchSolver::chooseWindowCount() const
+    {
+        if (m_nt <= 4) {
+            return m_nt;
+        }
+        size_t target = 4;
+        if (m_T >= 800.0) {
+            target = 16;
+        }
+        else if (m_T >= 450.0) {
+            target = 8;
+        }
+        return std::min(m_nt, target);
     }
 
     int HopfBranchSolver::solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose)
     {
+        omp_set_max_active_levels(1);
+        OpenBLASThreadContext __openblas_context(1);
+
         const size_t N_end = m_total_end;
         const size_t N_tot = N_end + 3;
+        const double w0 = m_weights_bord[N_end + 0];
+        const double w1 = m_weights_bord[N_end + 1];
+        const double w2 = m_weights_bord[N_end + 2];
 
-        // Precompute M_inner^(-1) * U_q = P_ST^(-1) * J_Yp[q] for q = 0, 1, 2
-        // and the 3x3 Schur complement S_{3x3} = D - V^T * (P_ST^(-1) * U)
+        size_t max_ns = 0;
+        for (size_t n = 0; n < m_nt; n++) {
+            max_ns = std::max(max_ns, m_slices[n].n_space);
+        }
+
+        const size_t M = chooseWindowCount();
+        if (M < m_nt) {
+            std::vector<size_t> w_start(M), w_end(M), end_idx(M), w_offs(M + 1, 0);
+            std::vector<double> win_dtau(M, 0.0);
+            for (size_t w = 0; w < M; w++) {
+                w_start[w] = (w * m_nt) / M;
+                w_end[w] = ((w + 1) * m_nt) / M;
+                end_idx[w] = w_end[w] - 1;
+                w_offs[w + 1] = w_offs[w] + m_slices[end_idx[w]].n_space;
+                for (size_t n = w_start[w]; n < w_end[w]; n++) {
+                    win_dtau[w] += m_dtau[n];
+                }
+            }
+            const size_t W_end = w_offs[M];
+            const size_t W_tot = W_end + 3;
+
+            std::vector<double> g_end(W_end, 0.0);
+            std::vector<double> J_win_end(3 * W_end, 0.0);
+            std::vector<double> V_win_lumped(3 * W_end, 0.0);
+            std::vector<double> w_weights(W_tot, 0.0);
+            std::vector<double> vt_g_win(3 * M, 0.0), vt_J_win(9 * M, 0.0);
+
+            for (size_t w = 0; w < M; w++) {
+                const size_t e = end_idx[w];
+                const size_t ns_e = m_slices[e].n_space;
+                const double scale_w = win_dtau[w] / m_dtau[e];
+                for (size_t i = 0; i < ns_e; i++) {
+                    w_weights[w_offs[w] + i] = m_weights_end[m_end_offsets[e] + i] * scale_w;
+                    V_win_lumped[0 * W_end + w_offs[w] + i] = m_g_space[m_end_offsets[e] + i];
+                    V_win_lumped[1 * W_end + w_offs[w] + i] = m_g_time[m_end_offsets[e] + i];
+                    V_win_lumped[2 * W_end + w_offs[w] + i] = row3_Y[m_end_offsets[e] + i];
+                }
+            }
+            w_weights[W_end + 0] = w0;
+            w_weights[W_end + 1] = w1;
+            w_weights[W_end + 2] = w2;
+
+            // Pre-eliminate window RHS (g) and parameter columns (J_win)
+#pragma omp parallel for schedule(static) if (M > 1)
+            for (size_t w = 0; w < M; w++) {
+                std::vector<double> cur(max_ns), nxt(max_ns);
+                const size_t s = w_start[w];
+                const size_t e = w_end[w] - 1;
+
+                auto run_col = [&](const double *src_Y, double *end_out, double *dot_out) {
+                    const size_t ns0 = m_slices[s].n_space;
+                    memcpy(cur.data(), &src_Y[m_end_offsets[s]], ns0 * sizeof(double));
+                    for (size_t i = 0; i < ns0; i++) {
+                        const double wt = m_weights_end[m_end_offsets[s] + i] * cur[i];
+                        dot_out[0] += wt * m_g_space[m_end_offsets[s] + i];
+                        dot_out[1] += wt * m_g_time[m_end_offsets[s] + i];
+                        dot_out[2] += wt * row3_Y[m_end_offsets[s] + i];
+                    }
+                    for (size_t n = s + 1; n <= e; n++) {
+                        const size_t ns_n = m_slices[n].n_space;
+                        m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], nxt.data(), true);
+                        for (size_t i = 0; i < ns_n; i++) {
+                            cur[i] = src_Y[m_end_offsets[n] + i] + nxt[i];
+                            const double wt = m_weights_end[m_end_offsets[n] + i] * cur[i];
+                            dot_out[0] += wt * m_g_space[m_end_offsets[n] + i];
+                            dot_out[1] += wt * m_g_time[m_end_offsets[n] + i];
+                            dot_out[2] += wt * row3_Y[m_end_offsets[n] + i];
+                        }
+                    }
+                    memcpy(&end_out[w_offs[w]], cur.data(), m_slices[e].n_space * sizeof(double));
+                };
+
+                run_col(rhs_Y, g_end.data(), &vt_g_win[3 * w]);
+                for (size_t q = 0; q < 3; q++) {
+                    run_col(&m_J_Yp[q * N_end], &J_win_end[q * W_end], &vt_J_win[9 * w + 3 * q]);
+                }
+            }
+
+            double rhs_p_win[3] = { rhs_p[0], rhs_p[1], rhs_p[2] };
+            double D_tilde[9] = {
+                0.0, 0.0, w0 * row3_p[0],
+                0.0, 0.0, w1 * row3_p[1],
+                0.0, 0.0, w2 * row3_p[2]
+            };
+            for (size_t w = 0; w < M; w++) {
+                for (size_t r_idx = 0; r_idx < 3; r_idx++) {
+                    rhs_p_win[r_idx] -= vt_g_win[3 * w + r_idx];
+                    for (size_t q = 0; q < 3; q++) {
+                        D_tilde[q * 3 + r_idx] -= vt_J_win[9 * w + 3 * q + r_idx];
+                    }
+                }
+            }
+
+            const bool use_pc = (M >= 2);
+            if (use_pc && m_precond.nt() != M) {
+                std::vector<SpatialSlice> win_slices(M);
+                std::vector<double> win_y_end(W_end);
+                for (size_t w = 0; w < M; w++) {
+                    const size_t e = end_idx[w];
+                    const size_t ns_e = m_slices[e].n_space;
+                    win_slices[w] = m_slices[e];
+                    memcpy(&win_y_end[w_offs[w]], &m_y_stages[m_stage_offsets[e] + (m_st - 1) * ns_e], ns_e * sizeof(double));
+                }
+                m_precond.update(M, win_slices.data(), nullptr, win_y_end.data(), win_dtau.data(), m_T, m_p, 1.0);
+            }
+
+            auto win_dot = [&](const double *a, const double *b) -> double {
+                double acc = 0.0;
+                for (size_t i = 0; i < W_end; i++) {
+                    acc += w_weights[i] * a[i] * b[i];
+                }
+                return acc;
+            };
+
+            std::vector<double> Minv_U_win(3 * W_end, 0.0);
+            double S3_win[9];
+            memcpy(S3_win, D_tilde, 9 * sizeof(double));
+            for (size_t q = 0; q < 3; q++) {
+                const double *Uq = &J_win_end[q * W_end];
+                double *MUq = &Minv_U_win[q * W_end];
+                if (use_pc) {
+                    m_precond.apply(Uq, MUq);
+                }
+                else {
+                    memcpy(MUq, Uq, W_end * sizeof(double));
+                }
+                S3_win[q * 3 + 0] -= win_dot(&V_win_lumped[0 * W_end], MUq);
+                S3_win[q * 3 + 1] -= win_dot(&V_win_lumped[1 * W_end], MUq);
+                S3_win[q * 3 + 2] -= win_dot(&V_win_lumped[2 * W_end], MUq);
+            }
+            int ipiv_w[3], info_w = 0;
+            dgetrf(3, 3, S3_win, 3, ipiv_w, &info_w);
+            const bool s3_w_ok = (info_w == 0);
+
+            std::vector<double> loc_v(3 * M, 0.0);
+            std::vector<double> win_cur_buf(M * max_ns), win_nxt_buf(M * max_ns);
+
+            auto A_win_op = [&](const RP(double) u_in, RP(double) out, size_t) -> int {
+                const double *uY = u_in;
+                const double *xp = u_in + W_end;
+                double *outY = out;
+                double *outp = out + W_end;
+
+                // Only parallelize across windows inside inner GMRES for large slices to avoid small-matrix BLAS/OpenMP contention
+#pragma omp parallel for schedule(static) if (M > 1 && max_ns >= 800)
+                for (size_t w = 0; w < M; w++) {
+                    double *cur = &win_cur_buf[w * max_ns];
+                    double *nxt = &win_nxt_buf[w * max_ns];
+                    const size_t prev_w = (w == 0) ? (M - 1) : (w - 1);
+                    const size_t s = w_start[w];
+                    const size_t e = w_end[w] - 1;
+                    memcpy(cur, &uY[w_offs[prev_w]], m_slices[end_idx[prev_w]].n_space * sizeof(double));
+
+                    double lv0 = 0.0, lv1 = 0.0, lv2 = 0.0;
+                    for (size_t n = s; n <= e; n++) {
+                        const size_t ns_n = m_slices[n].n_space;
+                        m_condensers[n].applyCondensedC(cur, m_transfers[n], nxt, true);
+                        for (size_t i = 0; i < ns_n; i++) {
+                            cur[i] = nxt[i];
+                            const double wt = m_weights_end[m_end_offsets[n] + i] * cur[i];
+                            lv0 += wt * m_g_space[m_end_offsets[n] + i];
+                            lv1 += wt * m_g_time[m_end_offsets[n] + i];
+                            lv2 += wt * row3_Y[m_end_offsets[n] + i];
+                        }
+                    }
+                    loc_v[3 * w + 0] = lv0;
+                    loc_v[3 * w + 1] = lv1;
+                    loc_v[3 * w + 2] = lv2;
+
+                    const size_t ns_e = m_slices[e].n_space;
+                    const double *uw = &uY[w_offs[w]];
+                    const double *j0 = &J_win_end[0 * W_end + w_offs[w]];
+                    const double *j1 = &J_win_end[1 * W_end + w_offs[w]];
+                    const double *j2 = &J_win_end[2 * W_end + w_offs[w]];
+                    double *ow = &outY[w_offs[w]];
+                    const double c0 = xp[0], c1 = xp[1], c2 = xp[2];
+                    for (size_t i = 0; i < ns_e; i++) {
+                        ow[i] = uw[i] - cur[i] + c0 * j0[i] + c1 * j1[i] + c2 * j2[i];
+                    }
+                }
+
+                outp[0] = D_tilde[0 * 3 + 0] * xp[0] + D_tilde[1 * 3 + 0] * xp[1] + D_tilde[2 * 3 + 0] * xp[2];
+                outp[1] = D_tilde[0 * 3 + 1] * xp[0] + D_tilde[1 * 3 + 1] * xp[1] + D_tilde[2 * 3 + 1] * xp[2];
+                outp[2] = D_tilde[0 * 3 + 2] * xp[0] + D_tilde[1 * 3 + 2] * xp[1] + D_tilde[2 * 3 + 2] * xp[2];
+                for (size_t w = 0; w < M; w++) {
+                    outp[0] += loc_v[3 * w + 0];
+                    outp[1] += loc_v[3 * w + 1];
+                    outp[2] += loc_v[3 * w + 2];
+                }
+                return 0;
+            };
+
+            auto M_win_op = [&](const RP(double) r, RP(double) z, size_t) -> int {
+                const double *rY = r;
+                const double *rp = r + W_end;
+                double *zY = z;
+                double *zp = z + W_end;
+
+                if (use_pc) {
+                    m_precond.apply(rY, zY);
+                }
+                else {
+                    memcpy(zY, rY, W_end * sizeof(double));
+                }
+
+                if (s3_w_ok) {
+                    double rhs3[3] = {
+                        rp[0] - win_dot(&V_win_lumped[0 * W_end], zY),
+                        rp[1] - win_dot(&V_win_lumped[1 * W_end], zY),
+                        rp[2] - win_dot(&V_win_lumped[2 * W_end], zY)
+                    };
+                    int info_s = 0;
+                    dgetrs("N", 3, 1, S3_win, 3, ipiv_w, rhs3, 3, &info_s);
+                    zp[0] = rhs3[0];
+                    zp[1] = rhs3[1];
+                    zp[2] = rhs3[2];
+                    const double p0 = zp[0], p1 = zp[1], p2 = zp[2];
+                    const double *mu0 = &Minv_U_win[0 * W_end];
+                    const double *mu1 = &Minv_U_win[1 * W_end];
+                    const double *mu2 = &Minv_U_win[2 * W_end];
+                    for (size_t i = 0; i < W_end; i++) {
+                        zY[i] -= p0 * mu0[i] + p1 * mu1[i] + p2 * mu2[i];
+                    }
+                }
+                else {
+                    zp[0] = rp[0];
+                    zp[1] = rp[1];
+                    zp[2] = rp[2];
+                }
+                return 0;
+            };
+
+            memcpy(m_bord_rhs, g_end.data(), W_end * sizeof(double));
+            m_bord_rhs[W_end + 0] = rhs_p_win[0];
+            m_bord_rhs[W_end + 1] = rhs_p_win[1];
+            m_bord_rhs[W_end + 2] = rhs_p_win[2];
+            memset(m_bord_sol, 0, W_tot * sizeof(double));
+
+            double orig_rhs_sq = w0 * rhs_p[0] * rhs_p[0] + w1 * rhs_p[1] * rhs_p[1] + w2 * rhs_p[2] * rhs_p[2];
+            for (size_t i = 0; i < N_end; i++) {
+                orig_rhs_sq += m_weights_end[i] * rhs_Y[i] * rhs_Y[i];
+            }
+            const double orig_rhs_norm = std::sqrt(std::max(0.0, orig_rhs_sq));
+            double win_beta0_sq = 0.0;
+            for (size_t i = 0; i < W_tot; i++) {
+                win_beta0_sq += w_weights[i] * m_bord_rhs[i] * m_bord_rhs[i];
+            }
+            const double win_beta0 = std::sqrt(std::max(0.0, win_beta0_sq));
+            const double rtol_win = (win_beta0 > 0.0 && orig_rhs_norm < win_beta0) ? std::max(1e-13, rtol * (orig_rhs_norm / win_beta0)) : rtol;
+
+            int niters = 0;
+            const int status = Krylov::gmres(A_win_op, M_win_op, W_tot, m_bord_sol, m_bord_rhs, w_weights.data(), m_gmres_work, 100, maxiter, rtol_win, 1e-13, &niters, verbose);
+
+            sol_p[0] = m_bord_sol[W_end + 0];
+            sol_p[1] = m_bord_sol[W_end + 1];
+            sol_p[2] = m_bord_sol[W_end + 2];
+
+            // Reconstruct all slice updates sol_Y inside each window
+#pragma omp parallel for schedule(static) if (M > 1)
+            for (size_t w = 0; w < M; w++) {
+                std::vector<double> cur(max_ns);
+                const size_t prev_w = (w == 0) ? (M - 1) : (w - 1);
+                const size_t s = w_start[w];
+                const size_t e = w_end[w] - 1;
+                memcpy(cur.data(), &m_bord_sol[w_offs[prev_w]], m_slices[end_idx[prev_w]].n_space * sizeof(double));
+
+                const double c0 = sol_p[0], c1 = sol_p[1], c2 = sol_p[2];
+                for (size_t n = s; n <= e; n++) {
+                    const size_t ns_n = m_slices[n].n_space;
+                    double *sn = &sol_Y[m_end_offsets[n]];
+                    m_condensers[n].applyCondensedC(cur.data(), m_transfers[n], sn, true);
+                    const double *rn = &rhs_Y[m_end_offsets[n]];
+                    const double *j0 = &m_J_Yp[0 * N_end + m_end_offsets[n]];
+                    const double *j1 = &m_J_Yp[1 * N_end + m_end_offsets[n]];
+                    const double *j2 = &m_J_Yp[2 * N_end + m_end_offsets[n]];
+                    for (size_t i = 0; i < ns_n; i++) {
+                        sn[i] = rn[i] + sn[i] - c0 * j0[i] - c1 * j1[i] - c2 * j2[i];
+                        cur[i] = sn[i];
+                    }
+                }
+            }
+            (void)status;
+            return niters;
+        }
+
+        // Direct uncondensed path when M == m_nt (e.g. very small nt <= 4)
         double S3[9]; // column-major 3x3
         double D3[9] = {
-            0.0, 0.0, row3_p[0],
-            0.0, 0.0, row3_p[1],
-            0.0, 0.0, row3_p[2]
+            0.0, 0.0, w0 * row3_p[0],
+            0.0, 0.0, w1 * row3_p[1],
+            0.0, 0.0, w2 * row3_p[2]
         };
 
         for (size_t q = 0; q < 3; q++) {
@@ -766,8 +1101,7 @@ namespace TWIST
             double *yp = y + N_end;
 
             // yY = xY - C_tilde * xY + J_Yp * xp
-            OpenBLASThreadContext __openblas_context(1);
-#pragma omp parallel for schedule(dynamic, 1)
+#pragma omp parallel for schedule(static) if (m_nt > 1 && max_ns >= 800)
             for (size_t n = 0; n < m_nt; n++) {
                 const size_t ns = m_slices[n].n_space;
                 const size_t prev = (n == 0) ? (m_nt - 1) : (n - 1);
@@ -790,7 +1124,7 @@ namespace TWIST
 
             yp[0] = endpointDot(m_g_space, xY);
             yp[1] = endpointDot(m_g_time, xY);
-            yp[2] = endpointDot(row3_Y, xY) + row3_p[0] * xp[0] + row3_p[1] * xp[1] + row3_p[2] * xp[2];
+            yp[2] = endpointDot(row3_Y, xY) + w0 * row3_p[0] * xp[0] + w1 * row3_p[1] * xp[1] + w2 * row3_p[2] * xp[2];
             return 0;
         };
 
@@ -836,7 +1170,7 @@ namespace TWIST
         memset(m_bord_sol, 0, N_tot * sizeof(double));
 
         int niters = 0;
-        const int status = Krylov::gmres(A_op, M_op, N_tot, m_bord_sol, m_bord_rhs, m_weights_bord, m_gmres_work, 40, maxiter, rtol, 1e-13, &niters, verbose);
+        const int status = Krylov::gmres(A_op, M_op, N_tot, m_bord_sol, m_bord_rhs, m_weights_bord, m_gmres_work, 100, maxiter, rtol, 1e-13, &niters, verbose);
 
         memcpy(sol_Y, m_bord_sol, N_end * sizeof(double));
         sol_p[0] = m_bord_sol[N_end + 0];
@@ -849,6 +1183,9 @@ namespace TWIST
 
     bool HopfBranchSolver::solveNewton(double ds, double tol, double min_damp, int max_iter, bool verbose)
     {
+        omp_set_max_active_levels(1);
+        OpenBLASThreadContext __openblas_context(1);
+
         const RadauDGMethod &rm = getRadauDG(m_st);
         double c = m_p[0];
         double T = m_T;
@@ -881,7 +1218,7 @@ namespace TWIST
             // Eisenstat-Walker forcing
             const double rtol_gmres = std::clamp(0.1 * norm_res, 1e-11, 1e-2);
             const double neg_Rp[3] = { -Rp[0], -Rp[1], -Rp[2] };
-            const int gmres_iters = solveBorderedGMRES(m_b_Y, neg_Rp, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, rtol_gmres, 120, false);
+            const int gmres_iters = solveBorderedGMRES(m_b_Y, neg_Rp, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, rtol_gmres, 200, false);
 
             // Recover full internal stage updates delta_stages in parallel
             const double dc = sol_p[0];
@@ -889,7 +1226,6 @@ namespace TWIST
             const double dalpha = sol_p[2];
             const double sps = m_p[m_np - 1];
 
-            OpenBLASThreadContext __openblas_context(1);
 #pragma omp parallel for schedule(dynamic, 1)
             for (size_t n = 0; n < m_nt; n++) {
                 const SpatialSlice *sl = &m_slices[n];
@@ -1051,7 +1387,7 @@ namespace TWIST
         double rhs_p[3] = { 0.0, 0.0, 1.0 };
         double sol_p[3] = { 0.0, 0.0, 0.0 };
 
-        solveBorderedGMRES(zero_Y, rhs_p, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, 1e-11, 120, false);
+        solveBorderedGMRES(zero_Y, rhs_p, m_tangent, &m_tangent[m_total_end], sol_Y, sol_p, 1e-11, 160, false);
 
         // Enforce orthogonality to g_space and g_time (should hold to ~1e-11 from solve)
         const double ps = endpointDot(m_g_space, sol_Y);
@@ -1062,9 +1398,9 @@ namespace TWIST
 
         // Preserve branch orientation <z_new, z_prev> > 0
         double dot_prev = endpointDot(m_tangent, sol_Y)
-                        + m_tangent[m_total_end + 0] * sol_p[0]
-                        + m_tangent[m_total_end + 1] * sol_p[1]
-                        + m_tangent[m_total_end + 2] * sol_p[2];
+                        + m_weights_bord[m_total_end + 0] * m_tangent[m_total_end + 0] * sol_p[0]
+                        + m_weights_bord[m_total_end + 1] * m_tangent[m_total_end + 1] * sol_p[1]
+                        + m_weights_bord[m_total_end + 2] * m_tangent[m_total_end + 2] * sol_p[2];
         const double sgn = (dot_prev >= 0.0) ? 1.0 : -1.0;
 
         memcpy(m_tangent, sol_Y, m_total_end * sizeof(double));
@@ -1643,6 +1979,7 @@ namespace TWIST
             }
         }
         ::serialize<double, 3>(group, "kymograph", kymo.data(), { (hsize_t)(m_nt + 1), (hsize_t)nx_kymo, (hsize_t)m_node });
+        m_serialization_file.flush(H5F_SCOPE_GLOBAL);
     }
 
     void HopfBranchSolver::loadFromH5(const std::string &h5_path, int solution_index)
@@ -1699,6 +2036,7 @@ namespace TWIST
         ::deserialize(group, "nt", nt_read);
         ::deserialize(group, "p", m_p);
         ::deserialize(group, "T", m_T);
+        m_T_scale = std::max(1.0, m_T);
 
         double *tau_read = nullptr;
         ::deserialize(group, "tau", tau_read);

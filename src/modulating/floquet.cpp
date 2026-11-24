@@ -1,9 +1,11 @@
 #include "modulating/floquet.h"
 #include "linalg.h"
+#include "tools/helpers.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <omp.h>
 
 namespace TWIST
 {
@@ -68,6 +70,9 @@ namespace TWIST
 
     FloquetSpectrum FloquetAnalyzer::compute(size_t nt, size_t st, const SpatialSlice *slices, const SparseDenseOutputOp *transfers, const SubintervalCondenser *condensers, const double *y_stages, const double *dtau, double T, const double *p, size_t neig, size_t nsub, double tol, double unstable_tol, bool verbose)
     {
+        omp_set_max_active_levels(1);
+        OpenBLASThreadContext __openblas_context(1);
+
         FloquetSpectrum spec;
 
         // Build local condensers/transfers only if caller didn't supply them

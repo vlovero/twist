@@ -9,6 +9,7 @@
 #include "tools/helpers.h"
 #include <algorithm>
 #include <cmath>
+#include <dlfcn.h>
 #include <filesystem>
 #include <limits>
 #include <omp.h>
@@ -107,6 +108,7 @@ int HopfArgs::run()
         }
         omp_set_num_threads(nthreads.value());
     }
+    omp_set_max_active_levels(1);
 
     if (!std::filesystem::exists(model)) {
         throw std::runtime_error(fmt::format("file {} does not exist", model));
@@ -128,6 +130,7 @@ int HopfArgs::run()
 
     TWIST::HopfBranchSolver solver;
     std::string param_name;
+    void *lib = nullptr;
 
     if (!resume.empty()) {
         if (resume.size() > 2) {
@@ -223,19 +226,16 @@ int HopfArgs::run()
         const int parnum = parameter ? resolve_parameter_index(params, param_name) : pmask_file[1];
         const size_t use_ncol = ncol ? (size_t)ncol.value() : nstages_file;
 
-        void *lib = nullptr;
         TWIST::Collocator col;
         bool use_stored_hopf = false;
         if (use_ncol == nstages_file) {
             TWIST::Collocator tmp(h5data, sol_idx);
             lib = tmp.getLibHandle();
             col = tmp;
-            col.setLibHandle(lib);
             tmp.clearLibHandle();
         }
         else {
             col = load_collocator_from_h5data_and_index(h5data, sol_idx, use_ncol, &lib);
-            col.setLibHandle(lib);
         }
 
         double omega = 0.0;
@@ -263,6 +263,9 @@ int HopfArgs::run()
             fmt::println("Computing Hopf eigenpair at solution index {}...", sol_idx);
             if (!compute_hopf_eigenpair_fallback(col, omega, psi, &h5data, sol_idx)) {
                 fmt::println(COLOR_RED "Failed to locate/refine Hopf eigenpair at index {}." COLOR_RESET, sol_idx);
+                if (lib) {
+                    dlclose(lib);
+                }
                 return 1;
             }
         }
@@ -271,6 +274,7 @@ int HopfArgs::run()
             sol_idx, param_name, col.p()[parnum], col.waveSpeed(), omega, (2.0 * M_PI) / omega);
 
         solver.initFromHopfPoint(col, omega, psi.data(), (size_t)nt, (size_t)ncol_time, parnum);
+        col.clearLibHandle();
     }
 
     TWIST::HopfContinuationBounds bounds;
@@ -287,6 +291,9 @@ int HopfArgs::run()
     bounds.allow_mesh_adaptation = !no_adapt;
 
     hopf_continuation_work_loop(solver, bounds, name, parameter_set, param_name, tag, prefix, verbose, max_steps);
+    if (lib) {
+        dlclose(lib);
+    }
     return 0;
 }
 

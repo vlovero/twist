@@ -256,6 +256,7 @@ namespace TWIST
         }
 
         // Factor the decoupled spatial blocks in parallel across OpenMP threads
+        omp_set_max_active_levels(1);
         OpenBLASThreadContext __openblas_context(1);
 
 #pragma omp parallel for schedule(dynamic, 1)

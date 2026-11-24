@@ -1,4 +1,5 @@
 #include "modulating/subinterval_condenser.h"
+#include "krylov/gmres.h"
 #include "linalg.h"
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,11 @@ namespace TWIST
             free(m_pjac_work);
             m_pjac_work = nullptr;
             m_pjac_work_cap = 0;
+        }
+        if (m_gmres_work) {
+            free(m_gmres_work);
+            m_gmres_work = nullptr;
+            m_gmres_work_cap = 0;
         }
     }
 
@@ -152,8 +158,18 @@ namespace TWIST
         complex_t *z_c = b_c + n;
 
         // b_hat = (-1 / dtau_T) * rhs_stages * (T_s^(-1) * A_inv)^T
-        // Note: m_p_in is row-major, so in Fortran column-major it is m_p_in^T
-        dgemm("N", "N", (int)n, (int)st, (int)st, -1.0 / m_dtau_T, rhs_stages, (int)n, m_p_in, (int)st, 0.0, b_hat, (int)n);
+        const double inv_neg_dt = -1.0 / m_dtau_T;
+        for (size_t k = 0; k < st; k++) {
+            double *bk = &b_hat[k * n];
+            memset(bk, 0, n * sizeof(double));
+            for (size_t l = 0; l < st; l++) {
+                const double fac = inv_neg_dt * m_p_in[k * st + l];
+                const double *rl = &rhs_stages[l * n];
+                for (size_t i = 0; i < n; i++) {
+                    bk[i] += fac * rl[i];
+                }
+            }
+        }
 
         size_t col = 0;
         for (size_t r = 0; r < m.n_real; r++) {
@@ -177,8 +193,18 @@ namespace TWIST
             col += 2;
         }
 
-        // dk_stages = z_hat * T_s^T  (m.T is row-major T_s -> col-major T_s^T)
-        dgemm("N", "N", (int)n, (int)st, (int)st, 1.0, z_hat, (int)n, m.T, (int)st, 0.0, dk_stages, (int)n);
+        // dk_stages = z_hat * T_s^T
+        for (size_t j = 0; j < st; j++) {
+            double *dj = &dk_stages[j * n];
+            memset(dj, 0, n * sizeof(double));
+            for (size_t k = 0; k < st; k++) {
+                const double fac = m.T[j * st + k];
+                const double *zk = &z_hat[k * n];
+                for (size_t i = 0; i < n; i++) {
+                    dj[i] += fac * zk[i];
+                }
+            }
+        }
     }
 
     void SubintervalCondenser::applyStageOperator(const double *dy_stages, double *out_stages) const
@@ -202,7 +228,16 @@ namespace TWIST
         }
 
         // out_stages -= dtau_T * ay * (A^R)^T
-        dgemm("N", "N", (int)n, (int)st, (int)st, -m_dtau_T, ay, (int)n, m.A, (int)st, 1.0, out_stages, (int)n);
+        for (size_t j = 0; j < st; j++) {
+            double *oj = &out_stages[j * n];
+            for (size_t l = 0; l < st; l++) {
+                const double fac = -m_dtau_T * m.A[j * st + l];
+                const double *al = &ay[l * n];
+                for (size_t i = 0; i < n; i++) {
+                    oj[i] += fac * al[i];
+                }
+            }
+        }
     }
 
     void SubintervalCondenser::solveLocalStages(const double *rhs_stages, double *dk_stages, bool exact_stage_jac) const
@@ -233,6 +268,7 @@ namespace TWIST
         double *res = m_work + 5 * total;
         double *corr = m_work + 6 * total;
         double prev_res_norm = rhs_norm;
+        bool richardson_ok = false;
 
         for (int sweep = 0; sweep < 4; sweep++) {
             applyStageOperator(dk_stages, res);
@@ -240,16 +276,44 @@ namespace TWIST
                 res[i] = rhs_copy[i] - res[i];
             }
             const double res_norm = norm2(res, total);
-            if (res_norm <= 1e-13 * rhs_norm) {
+            if (res_norm <= 1e-12 * rhs_norm) {
+                richardson_ok = true;
                 break;
             }
-            if (res_norm > 0.5 * prev_res_norm && sweep > 0) {
+            if (res_norm > 0.5 * prev_res_norm) {
                 break;
             }
             prev_res_norm = res_norm;
             applyPrecondOnly(res, corr);
             for (size_t i = 0; i < total; i++) {
                 dk_stages[i] += corr[i];
+            }
+        }
+
+        if (!richardson_ok) {
+            // Check residual after last sweep before resorting to local GMRES
+            applyStageOperator(dk_stages, res);
+            for (size_t i = 0; i < total; i++) {
+                res[i] = rhs_copy[i] - res[i];
+            }
+            const double res_norm = norm2(res, total);
+            if (res_norm > 1e-10 * rhs_norm) {
+                const size_t restart = 16;
+                const size_t lwork = Krylov::gmres_lwork(total, restart);
+                if (m_gmres_work_cap < lwork) {
+                    m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
+                    m_gmres_work_cap = lwork;
+                }
+                auto A_loc = [&](const RP(double) x, RP(double) y, size_t) -> int {
+                    applyStageOperator(x, y);
+                    return 0;
+                };
+                auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
+                    applyPrecondOnly(r, z);
+                    return 0;
+                };
+                int local_nit = 0;
+                Krylov::gmres(A_loc, M_loc, total, dk_stages, rhs_copy, nullptr, m_gmres_work, (int)restart, 32, 1e-12, 1e-13 * rhs_norm, &local_nit, false);
             }
         }
     }

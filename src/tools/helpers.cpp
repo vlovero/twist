@@ -6,12 +6,16 @@
 
 OpenBLASThreadContext::OpenBLASThreadContext(const int nwanted) : m_nwanted(nwanted), m_ndefault(openblas_get_num_threads())
 {
-    openblas_set_num_threads_(&m_nwanted);
+    if (m_nwanted != m_ndefault) {
+        openblas_set_num_threads_(&m_nwanted);
+    }
 }
 
 OpenBLASThreadContext::~OpenBLASThreadContext()
 {
-    openblas_set_num_threads_(&m_ndefault);
+    if (m_nwanted != m_ndefault) {
+        openblas_set_num_threads_(&m_ndefault);
+    }
 }
 
 static herr_t op_func(hid_t, const char *name, const H5L_info_t *, void *op_data)

@@ -25,7 +25,7 @@ namespace TWIST
         size_t min_nodes_adapt = 16;
         size_t max_nodes_adapt = 200;
         size_t min_nt_adapt = 16;
-        size_t max_nt_adapt = 48;
+        size_t max_nt_adapt = 96;
         bool allow_mesh_adaptation = true;
     };
 
@@ -123,7 +123,9 @@ namespace TWIST
         // Factors condensers, computes condensed RHS `b_Y`, scalar param columns `J_Yp`, and updates preconditioner.
         void assembleCondensedSystem(const double *G, bool update_precond);
 
-        // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES.
+        // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES
+        // with adaptive M-window exact block condensation.
+        size_t chooseWindowCount() const;
         int solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose);
 
         // Weighted L2 inner product on endpoint space (length m_total_end)
@@ -170,6 +172,7 @@ namespace TWIST
         double m_c_prev = 0.0;
         double m_T = 0.0;
         double m_T_prev = 0.0;
+        double m_T_scale = 1.0;
         double m_alpha_prev = 0.0;
 
         double *m_y_ref_end = nullptr;     // m_total_end (reference for phase conditions)

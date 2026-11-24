@@ -756,7 +756,12 @@ void locate_all_floquet_bifurcations_inplace(const std::string &file)
     deserialize(basic, "pmask", pmask);
 
     int prev_nu = 0;
+    uint64_t st0 = 0;
     {
+        H5::Group s0 = h5file.openGroup("0");
+        if (s0.nameExists("stype")) {
+            deserialize(s0, "stype", st0);
+        }
         H5::Group fg = h5file.openGroup("0/floquet");
         deserialize(fg, "n_unstable", prev_nu);
     }
@@ -769,6 +774,12 @@ void locate_all_floquet_bifurcations_inplace(const std::string &file)
 
         int cur_nu = 0;
         deserialize(fg_cur, "n_unstable", cur_nu);
+
+        // Emergence of primary Hopf branch at k=1 from steady torusPoint is expected, not a secondary Floquet bifurcation
+        if (k == 1 && st0 == TWIST::SolutionTypes::torusPoint) {
+            prev_nu = cur_nu;
+            continue;
+        }
 
         if (cur_nu != prev_nu) {
             double *mr_cur = nullptr, *mi_cur = nullptr, *mr_prev = nullptr, *mi_prev = nullptr;

@@ -80,5 +80,7 @@ namespace TWIST
         size_t m_cwork_cap = 0;
         mutable double *m_pjac_work = nullptr;
         size_t m_pjac_work_cap = 0;
+        mutable double *m_gmres_work = nullptr;
+        mutable size_t m_gmres_work_cap = 0;
     };
 } // namespace TWIST

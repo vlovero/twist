@@ -44,6 +44,7 @@ int get_number_of_solutions(const std::string &path)
 
     switch (file_type) {
     case TWIST::FileType::continuation:
+    case TWIST::FileType::hopf_continuation:
         ngroups -= 2;
         break;
     case TWIST::FileType::spectrum:
@@ -91,6 +92,7 @@ int get_number_of_solutions(H5::H5File &h5_file)
 
     switch (file_type) {
     case TWIST::FileType::continuation:
+    case TWIST::FileType::hopf_continuation:
         ngroups -= 2;
         break;
     case TWIST::FileType::spectrum:
