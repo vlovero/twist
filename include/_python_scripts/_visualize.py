@@ -482,6 +482,7 @@ class DispersionCurve:
         self.apd_value = apd_value
         self.kymo_im = None
         self.unit_circle_line = None
+        self.spectrum_mode = None
         self.dispersion_mode, *self.dispersion_mode_colors = dispersion_mode.split(":")
 
         self.solution_index = 0
@@ -791,7 +792,8 @@ class DispersionCurve:
             ax2.set_xlabel(r"$\xi$")
         if self.stability_data is not None:
             self.spectrum_points = self.spectrum_ax.scatter
-            self.spectrum_sc = self.spectrum_ax.scatter([], [], c=self.sol_line.get_color(), s=16, zorder=13)
+            self.spectrum_sc = self.spectrum_ax.scatter([], [], c=self.sol_line.get_color(), s=6, zorder=13)
+            self.spectrum_mode = None
         self._plot_solution_at_index(index)
 
     def _update_inactive_solutions(self):
@@ -857,16 +859,19 @@ class DispersionCurve:
                 else:
                     x, y = [], []
                 self.spectrum_sc.set_offsets(np.c_[x, y])
+                self.spectrum_sc.set_sizes([16])
                 lim = 1.35
                 if len(x) > 0:
                     lim = max(1.35, 1.15 * float(np.max(np.hypot(x, y))))
-                self.spectrum_ax.set_xlim(-lim, lim)
-                self.spectrum_ax.set_ylim(-lim, lim)
+                if (not self.initialized) or (self.spectrum_mode != "hopf"):
+                    self.spectrum_ax.set_xlim(-lim, lim)
+                    self.spectrum_ax.set_ylim(-lim, lim)
                 self.spectrum_ax.set_aspect("equal", adjustable="box")
                 self.spectrum_ax.set_xlabel(r"$\mathrm{Re}(\mu)$")
                 self.spectrum_ax.set_ylabel(r"$\mathrm{Im}(\mu)$")
                 self.spectrum_ax.spines[["top", "right"]].set_visible(False)
                 self.spectrum_ax.spines[["left", "bottom"]].set_position(("axes", 0.0))
+                self.spectrum_mode = "hopf"
         else:
             if self.kymo_im is not None:
                 self.kymo_im.set_visible(False)
@@ -903,12 +908,21 @@ class DispersionCurve:
                 if f"{sol_index}/spectrum" in file:
                     x, y = get_eigenvalues(file, f"{sol_index}/spectrum")
                 else:
-                    x, y = [], []
+                    x, y = np.array([]), np.array([])
                 self.spectrum_sc.set_offsets(np.c_[x, y])
-                self.spectrum_ax.relim()
-                self.spectrum_ax.autoscale_view(True, True, True)
+                self.spectrum_sc.set_sizes([6])
+                if len(x) > 0:
+                    self.spectrum_ax.dataLim.update_from_data_xy(np.column_stack([x, y]), ignore=True)
+                    if (not self.initialized) or (self.spectrum_mode != "steady"):
+                        dx = float(x.max() - x.min()) or 1.0
+                        dy = float(y.max() - y.min()) or 1.0
+                        self.spectrum_ax.set_xlim(float(x.min()) - 0.05 * dx, float(x.max()) + 0.05 * dx)
+                        self.spectrum_ax.set_ylim(float(y.min()) - 0.05 * dy, float(y.max()) + 0.05 * dy)
+                self.spectrum_ax.set_xlabel(r"$\mathrm{Re}(\lambda)$")
+                self.spectrum_ax.set_ylabel(r"$\mathrm{Im}(\lambda)$")
                 self.spectrum_ax.spines[["top", "right"]].set_visible(False)
                 self.spectrum_ax.spines[["left", "bottom"]].set_position("zero")
+                self.spectrum_mode = "steady"
 
         if self.initialized:
             for fig in self.figs:
