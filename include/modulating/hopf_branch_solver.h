@@ -125,7 +125,6 @@ namespace TWIST
 
         // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES
         // with adaptive M-window exact block condensation.
-        size_t chooseWindowCount() const;
         int solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose);
 
         // Weighted L2 inner product on endpoint space (length m_total_end)
@@ -199,6 +198,8 @@ namespace TWIST
 
         double *m_stage_scratch = nullptr; // per-thread/general scratch
         size_t m_stage_scratch_cap = 0;
+        size_t m_stage_scratch_stride = 0;
+        mutable size_t m_win_M = 1;
 
         // HDF5 serialization state
         int m_serialization_index = -1;

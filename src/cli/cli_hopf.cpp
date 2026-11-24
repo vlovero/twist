@@ -109,6 +109,7 @@ int HopfArgs::run()
         omp_set_num_threads(nthreads.value());
     }
     omp_set_max_active_levels(1);
+    OpenBLASThreadContext __openblas_context(1);
 
     if (!std::filesystem::exists(model)) {
         throw std::runtime_error(fmt::format("file {} does not exist", model));

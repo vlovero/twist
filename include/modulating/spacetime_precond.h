@@ -20,6 +20,7 @@ namespace TWIST
         ~RealSchurSpaceTimePrecond();
 
         void freeBuffers();
+        void invalidate() { m_nt = 0; }
 
         // Updates the preconditioner from the current N_t slices, condensers, temporal step sizes dtau[0..nt-1],
         // scalar period T, parameter vector p, and theta (default 1.0, L-stable for DAE algebraic modes).
