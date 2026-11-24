@@ -22,6 +22,8 @@ public:
 
 int get_number_of_solutions(const std::string &path);
 int get_number_of_solutions(H5::H5File &h5_file);
+int get_number_of_solutions(const H5::Group &group);
+std::vector<std::string> get_hopf_branch_names(H5::H5File &h5_file);
 
 void verified_json_load(const std::string &path, simdjson::dom::element &doc, simdjson::dom::parser &parser);
 void verify_basic_info(const H5::H5File &file1, const H5::H5File &file2);
