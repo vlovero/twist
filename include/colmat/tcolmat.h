@@ -1671,7 +1671,7 @@ namespace DEV
                 }
 
 // backsub to get remaining solution
-#pragma omp parallel for private(i, block)
+#pragma omp parallel for private(i, block) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     block = &m_partitions[i];
                     block->backsubstitute(nrhs, x, y, N, i);
@@ -1792,7 +1792,7 @@ namespace DEV
                 }
 
 // go through and update each block
-#pragma omp parallel for private(i, Yi, prowi) if (node > 5)
+#pragma omp parallel for private(i, Yi, prowi) if (node > 5 && m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     double *local_work = ((double *)m_work) + (omp_get_thread_num() * ncol * node * node);
                     Partition<data_t> *partition = &m_partitions[i];
@@ -1926,7 +1926,7 @@ namespace DEV
 
                 TWIST_MARK_BEGIN("condense");
 
-#pragma omp parallel for private(i)
+#pragma omp parallel for private(i) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     Partition<data_t> *partition = &m_partitions[i];
                     partition->condense();
@@ -2048,7 +2048,7 @@ namespace DEV
                 memcpy(&x[N - nparam], &w[Ns - nparam], nparam * sizeof(data_t));
 
                 // back substitution on final blocks and inverse column swaps
-#pragma omp parallel for private(i) firstprivate(x, y, N)
+#pragma omp parallel for private(i) firstprivate(x, y, N) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     const Partition<data_t> &partition = m_partitions[i];
                     partition.backsubstitute(x, y, N, i);
@@ -2146,7 +2146,7 @@ namespace DEV
                 lacpy("A", nparam, nrhs, &w[Ns - nparam], Ns, &x[N - nparam], N);
 
                 // back substitution on final blocks and inverse column swaps
-#pragma omp parallel for private(i)
+#pragma omp parallel for private(i) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     const Partition<data_t> &partition = m_partitions[i];
                     // partition.backsubstitute(x, y, M, i);

@@ -544,6 +544,21 @@ namespace
             CHECK(status == 0);
             CHECK(gm_iters < 15);
             CHECK(max_err < 1e-8);
+
+            // Verify computeCondensedMatrix matches applyCondensedC column-by-column
+            std::vector<double> C_mat(ns * ns), e_col(ns, 0.0), ref_col(ns, 0.0);
+            condensers[0].computeCondensedMatrix(transfers[0], C_mat.data());
+            double max_cmat_err = 0.0;
+            for (size_t j = 0; j < ns; j += 5) {
+                e_col[j] = 1.0;
+                condensers[0].applyCondensedC(e_col.data(), transfers[0], ref_col.data(), true);
+                e_col[j] = 0.0;
+                for (size_t i = 0; i < ns; i++) {
+                    max_cmat_err = std::max(max_cmat_err, std::abs(C_mat[j * ns + i] - ref_col[i]));
+                }
+            }
+            fmt::println("[Test 4] computeCondensedMatrix vs applyCondensedC max err = {:.3e}", max_cmat_err);
+            CHECK(max_cmat_err < 1e-11);
         }
     }
 } // namespace

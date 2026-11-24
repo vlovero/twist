@@ -42,6 +42,10 @@ namespace TWIST
         //   w_out = [A_n^{-1} (1_{st} x B_{M_n} P_{n-1 -> n} v_prev)]_{st}
         void applyCondensedC(const RP(double) v_prev, const SparseDenseOutputOp &transfer_prev_to_cur, RP(double) w_out, bool exact_stage_jac = true) const;
 
+        // Assembles the explicit column-major condensed propagator matrix C_out (n_space x K)
+        // where column j is applyCondensedC(e_j, transfer_prev_to_cur, col_j, true), using batched BLAS3 solves.
+        void computeCondensedMatrix(const SparseDenseOutputOp &transfer_prev_to_cur, double *C_out) const;
+
         // Computes d(R_space)/dp_col at stage `l` (0 <= l < st) on `m_slice`, length n_space.
         // `param_index` is the index in `p[]` (e.g., 0 for c, pmask[1] for alpha).
         void evalSpatialParamDeriv(size_t stage_l, const double *y_stage, const double *p, int param_index, RP(double) out) const;
@@ -54,6 +58,8 @@ namespace TWIST
     private:
         void ensureWorkspace(size_t n_space, size_t st);
         void applyPrecondOnly(const double *rhs_stages, double *dk_stages) const;
+        void applyPrecondOnlyBatch(size_t K, const double *rhs_stages, double *dk_stages, double *batch_work, complex_t *cbatch_work) const;
+        void applyStageOperatorBatch(size_t K, const double *dy_stages, double *out_stages, double *ay_buf, double *mass_work) const;
 
         const SpatialSlice *m_slice = nullptr;
         size_t m_st = 0;

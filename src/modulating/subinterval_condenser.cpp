@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace TWIST
 {
@@ -344,14 +345,258 @@ namespace TWIST
             applyElementPropagator(v_prev, w_out, exact_stage_jac);
             return;
         }
-        const size_t n = m_n_space;
-        const size_t st = m_st;
-        double *v_cur = m_work + 9 * n * st + n; // disjoint from bw (at 9*total) and mass_work? Wait:
-        // If we transfer first, then applyElementPropagator uses 9*total for bw + mass_work!
-        // Use m_y_avg (size n, unused after factor) for v_cur!
-        v_cur = m_y_avg;
+        double *v_cur = m_y_avg;
         transfer_prev_to_cur.apply(v_prev, v_cur);
         applyElementPropagator(v_cur, w_out, exact_stage_jac);
+    }
+
+    void SubintervalCondenser::applyPrecondOnlyBatch(size_t K, const double *rhs_stages, double *dk_stages, double *batch_work, complex_t *cbatch_work) const
+    {
+        const RadauDGMethod &m = getRadauDG(m_st);
+        const size_t n = m_n_space;
+        const size_t st = m_st;
+        const size_t block_len = n * K;
+
+        double *b_hat = batch_work;
+        double *z_hat = b_hat + st * block_len;
+        complex_t *b_c = cbatch_work;
+        complex_t *z_c = b_c + block_len;
+
+        const double inv_neg_dt = -1.0 / m_dtau_T;
+        for (size_t k = 0; k < st; k++) {
+            double *bk = &b_hat[k * block_len];
+            memset(bk, 0, block_len * sizeof(double));
+            for (size_t l = 0; l < st; l++) {
+                const double fac = inv_neg_dt * m_p_in[k * st + l];
+                const double *rl = &rhs_stages[l * block_len];
+                for (size_t p = 0; p < block_len; p++) {
+                    bk[p] += fac * rl[p];
+                }
+            }
+        }
+
+        size_t col = 0;
+        for (size_t r = 0; r < m.n_real; r++) {
+            if (K == 1) {
+                m_real_mats[r].solve(&b_hat[col * block_len], &z_hat[col * block_len]);
+            }
+            else {
+                m_real_mats[r].solve(&b_hat[col * block_len], &z_hat[col * block_len], (ptrdiff_t)K);
+            }
+            col++;
+        }
+
+        for (size_t r = 0; r < m.n_complex; r++) {
+            const double *br = &b_hat[col * block_len];
+            const double *bi = &b_hat[(col + 1) * block_len];
+            for (size_t p = 0; p < block_len; p++) {
+                b_c[p] = complex_t(br[p], bi[p]);
+            }
+            if (K == 1) {
+                m_complex_mats[r].solve(b_c, z_c);
+            }
+            else {
+                m_complex_mats[r].solve(b_c, z_c, (ptrdiff_t)K);
+            }
+            double *zr = &z_hat[col * block_len];
+            double *zi = &z_hat[(col + 1) * block_len];
+            for (size_t p = 0; p < block_len; p++) {
+                zr[p] = z_c[p].real();
+                zi[p] = z_c[p].imag();
+            }
+            col += 2;
+        }
+
+        for (size_t j = 0; j < st; j++) {
+            double *dj = &dk_stages[j * block_len];
+            memset(dj, 0, block_len * sizeof(double));
+            for (size_t k = 0; k < st; k++) {
+                const double fac = m.T[j * st + k];
+                const double *zk = &z_hat[k * block_len];
+                for (size_t p = 0; p < block_len; p++) {
+                    dj[p] += fac * zk[p];
+                }
+            }
+        }
+    }
+
+    void SubintervalCondenser::applyStageOperatorBatch(size_t K, const double *dy_stages, double *out_stages, double *ay_buf, double *mass_work) const
+    {
+        const RadauDGMethod &m = getRadauDG(m_st);
+        const size_t n = m_n_space;
+        const size_t st = m_st;
+        const size_t block_len = n * K;
+
+        for (size_t l = 0; l < st; l++) {
+            const double *dy_l = &dy_stages[l * block_len];
+            double *out_l = &out_stages[l * block_len];
+            for (size_t j = 0; j < K; j++) {
+                m_slice->applyMass(&dy_l[j * n], &out_l[j * n], 1.0, 0.0, mass_work);
+            }
+            const DEV::Matrix &jac = m_has_stage_jacs ? m_stage_jacs[l] : m_avg_jac;
+            if (K == 1) {
+                jac.gemv(0.0, &ay_buf[l * block_len], 1.0, dy_l);
+            }
+            else {
+                jac.gemm((ptrdiff_t)K, 0.0, &ay_buf[l * block_len], 1.0, dy_l);
+            }
+        }
+
+        for (size_t j = 0; j < st; j++) {
+            double *oj = &out_stages[j * block_len];
+            for (size_t l = 0; l < st; l++) {
+                const double fac = -m_dtau_T * m.A[j * st + l];
+                const double *al = &ay_buf[l * block_len];
+                for (size_t p = 0; p < block_len; p++) {
+                    oj[p] += fac * al[p];
+                }
+            }
+        }
+    }
+
+    void SubintervalCondenser::computeCondensedMatrix(const SparseDenseOutputOp &transfer_prev_to_cur, double *C_out) const
+    {
+        const size_t n = m_n_space;
+        const size_t st = m_st;
+        const size_t K = transfer_prev_to_cur.is_identity ? n : (transfer_prev_to_cur.src_npts * transfer_prev_to_cur.node);
+        const size_t chunk_max = 64;
+
+        std::vector<double> e_vec(K, 0.0);
+        std::vector<double> v_cur(n);
+        std::vector<double> rhs_chunk(st * n * chunk_max);
+        std::vector<double> dk_chunk(st * n * chunk_max);
+        std::vector<double> res_chunk(st * n * chunk_max);
+        std::vector<double> corr_chunk(st * n * chunk_max);
+        std::vector<double> ay_chunk(st * n * chunk_max);
+        std::vector<double> pc_work(2 * st * n * chunk_max);
+        std::vector<complex_t> pc_cwork(2 * n * chunk_max);
+        std::vector<double> rhs_1col(st * n), dk_1col(st * n);
+        std::vector<double> col_rhs_norm(chunk_max), col_prev_res(chunk_max);
+        std::vector<unsigned char> col_active(chunk_max);
+        std::vector<double> mass_work_buf(m_slice->node * m_slice->nstages + 64);
+        double *mass_work = mass_work_buf.data();
+
+        for (size_t c0 = 0; c0 < K; c0 += chunk_max) {
+            const size_t ck = std::min(chunk_max, K - c0);
+            const size_t block_len = n * ck;
+
+            // Assemble rhs_chunk for columns [c0, c0 + ck)
+            for (size_t j = 0; j < ck; j++) {
+                if (transfer_prev_to_cur.is_identity) {
+                    memset(v_cur.data(), 0, n * sizeof(double));
+                    v_cur[c0 + j] = 1.0;
+                }
+                else {
+                    e_vec[c0 + j] = 1.0;
+                    transfer_prev_to_cur.apply(e_vec.data(), v_cur.data());
+                    e_vec[c0 + j] = 0.0;
+                }
+                m_slice->applyMass(v_cur.data(), &rhs_chunk[0 * block_len + j * n], 1.0, 0.0, mass_work);
+            }
+            for (size_t l = 1; l < st; l++) {
+                memcpy(&rhs_chunk[l * block_len], &rhs_chunk[0], block_len * sizeof(double));
+            }
+
+            applyPrecondOnlyBatch(ck, rhs_chunk.data(), dk_chunk.data(), pc_work.data(), pc_cwork.data());
+
+            if (m_has_stage_jacs) {
+                for (size_t j = 0; j < ck; j++) {
+                    double sq = 0.0;
+                    for (size_t l = 0; l < st; l++) {
+                        const double *col = &rhs_chunk[l * block_len + j * n];
+                        for (size_t i = 0; i < n; i++) {
+                            sq += col[i] * col[i];
+                        }
+                    }
+                    col_rhs_norm[j] = std::sqrt(sq);
+                    col_prev_res[j] = col_rhs_norm[j];
+                    col_active[j] = (col_rhs_norm[j] > 0.0) ? 1 : 0;
+                }
+
+                for (int sweep = 0; sweep < 4; sweep++) {
+                    applyStageOperatorBatch(ck, dk_chunk.data(), res_chunk.data(), ay_chunk.data(), mass_work);
+                    for (size_t p = 0; p < st * block_len; p++) {
+                        res_chunk[p] = rhs_chunk[p] - res_chunk[p];
+                    }
+
+                    bool any_active = false;
+                    for (size_t j = 0; j < ck; j++) {
+                        if (!col_active[j]) continue;
+                        double sq = 0.0;
+                        for (size_t l = 0; l < st; l++) {
+                            const double *col = &res_chunk[l * block_len + j * n];
+                            for (size_t i = 0; i < n; i++) {
+                                sq += col[i] * col[i];
+                            }
+                        }
+                        const double rn = std::sqrt(sq);
+                        if (rn <= 1e-12 * col_rhs_norm[j] || rn > 0.5 * col_prev_res[j]) {
+                            col_active[j] = 0;
+                        }
+                        else {
+                            col_prev_res[j] = rn;
+                            any_active = true;
+                        }
+                    }
+                    if (!any_active) {
+                        break;
+                    }
+
+                    applyPrecondOnlyBatch(ck, res_chunk.data(), corr_chunk.data(), pc_work.data(), pc_cwork.data());
+                    for (size_t j = 0; j < ck; j++) {
+                        if (!col_active[j]) continue;
+                        for (size_t l = 0; l < st; l++) {
+                            double *dcol = &dk_chunk[l * block_len + j * n];
+                            const double *ccol = &corr_chunk[l * block_len + j * n];
+                            for (size_t i = 0; i < n; i++) {
+                                dcol[i] += ccol[i];
+                            }
+                        }
+                    }
+                }
+
+                // Final residual check per column; polish only unconverged columns with local GMRES
+                applyStageOperatorBatch(ck, dk_chunk.data(), res_chunk.data(), ay_chunk.data(), mass_work);
+                for (size_t j = 0; j < ck; j++) {
+                    if (col_rhs_norm[j] == 0.0) continue;
+                    double sq = 0.0;
+                    for (size_t l = 0; l < st; l++) {
+                        const double *r_src = &rhs_chunk[l * block_len + j * n];
+                        const double *a_dk = &res_chunk[l * block_len + j * n];
+                        for (size_t i = 0; i < n; i++) {
+                            const double d = r_src[i] - a_dk[i];
+                            sq += d * d;
+                        }
+                    }
+                    if (std::sqrt(sq) > 1e-10 * col_rhs_norm[j]) {
+                        for (size_t l = 0; l < st; l++) {
+                            memcpy(&rhs_1col[l * n], &rhs_chunk[l * block_len + j * n], n * sizeof(double));
+                            memcpy(&dk_1col[l * n], &dk_chunk[l * block_len + j * n], n * sizeof(double));
+                        }
+                        const size_t total = st * n;
+                        const size_t restart = 16;
+                        const size_t lwork = Krylov::gmres_lwork(total, restart);
+                        if (m_gmres_work_cap < lwork) {
+                            m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
+                            m_gmres_work_cap = lwork;
+                        }
+                        auto A_loc = [&](const RP(double) x, RP(double) y, size_t) -> int {
+                            applyStageOperator(x, y);
+                            return 0;
+                        };
+                        auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
+                            applyPrecondOnly(r, z);
+                            return 0;
+                        };
+                        int local_nit = 0;
+                        Krylov::gmres(A_loc, M_loc, total, dk_1col.data(), rhs_1col.data(), nullptr, m_gmres_work, (int)restart, 32, 1e-12, 1e-13 * col_rhs_norm[j], &local_nit, false);
+                        memcpy(&dk_chunk[(st - 1) * block_len + j * n], &dk_1col[(st - 1) * n], n * sizeof(double));
+                    }
+                }
+            }
+
+            memcpy(&C_out[c0 * n], &dk_chunk[(st - 1) * block_len], block_len * sizeof(double));
+        }
     }
 
     void SubintervalCondenser::evalSpatialParamDeriv(size_t /*stage_l*/, const double *y_stage, const double *p, int param_index, RP(double) out) const
