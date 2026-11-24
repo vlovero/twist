@@ -273,16 +273,16 @@ namespace TWIST
 
             if (!blk.is_complex) {
                 DEV::Matrix &mat = m_real_mats[blk.mat_idx];
-                mat.copyPartitionsFrom(m_ref_jac, &m_real_bc);
-                mat.addMassBlock(m_ref_slice.M, m_ref_slice.c_A, m_ref_slice.c_b, m_ref_slice.h, -a_eff / m_T);
+                mat.copyPartitionsFrom(m_ref_jac, &m_real_bc, false);
+                mat.addMassBlockSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, m_ref_slice.c_A, m_ref_slice.c_b, m_ref_slice.h, -a_eff / m_T, false);
                 mat.factor();
             }
             else {
                 DEV::ComplexMatrix &mat = m_complex_mats[blk.mat_idx];
-                mat.copyPartitionsFrom(m_ref_jac, &m_complex_bc);
+                mat.copyPartitionsFrom(m_ref_jac, &m_complex_bc, false);
                 // Solve (A_ref - (a - i * sgn * beta)/T * B_ref) (z_k + i z_{k+1}) = -(1/T) (r_k + i r_{k+1})
                 const complex_t scale(-a_eff / m_T, +(blk.sgn * blk.beta) / m_T);
-                mat.addMassBlock(m_ref_slice.M, m_ref_slice.c_A, m_ref_slice.c_b, m_ref_slice.h, scale);
+                mat.addMassBlockSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, m_ref_slice.c_A, m_ref_slice.c_b, m_ref_slice.h, scale, false);
                 mat.factor();
             }
         }

@@ -134,15 +134,15 @@ namespace TWIST
         }
 
         for (size_t r = 0; r < m.n_real; r++) {
-            m_real_mats[r].copyPartitionsFrom(m_avg_jac, &m_real_bc);
-            m_real_mats[r].addMassBlock(slice->M, slice->c_A, slice->c_b, slice->h, -m.real_eigs[r] / dtau_T);
+            m_real_mats[r].copyPartitionsFrom(m_avg_jac, &m_real_bc, false);
+            m_real_mats[r].addMassBlockSparse(slice->m_nnz, slice->m_rows, slice->m_cols, slice->m_vals, slice->c_A, slice->c_b, slice->h, -m.real_eigs[r] / dtau_T, false);
             m_real_mats[r].factor();
         }
 
         for (size_t r = 0; r < m.n_complex; r++) {
-            m_complex_mats[r].copyPartitionsFrom(m_avg_jac, &m_complex_bc);
+            m_complex_mats[r].copyPartitionsFrom(m_avg_jac, &m_complex_bc, false);
             const complex_t scale(-m.complex_re[r] / dtau_T, +m.complex_im[r] / dtau_T);
-            m_complex_mats[r].addMassBlock(slice->M, slice->c_A, slice->c_b, slice->h, scale);
+            m_complex_mats[r].addMassBlockSparse(slice->m_nnz, slice->m_rows, slice->m_cols, slice->m_vals, slice->c_A, slice->c_b, slice->h, scale, false);
             m_complex_mats[r].factor();
         }
     }

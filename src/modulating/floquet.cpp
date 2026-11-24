@@ -388,8 +388,8 @@ namespace TWIST
             base_real.update(slices[n].fjac, slices[n].pjac, (ptrdiff_t)slices[n].nnodes, (ptrdiff_t)slices[n].node, (ptrdiff_t)slices[n].nstages, 0, slices[n].unscaled_spatial_period, slices[n].h, y_avg.data(), p, pmask_dummy, nullptr, &real_bc);
 
             for (size_t k = 0; k < st; k++) {
-                cc.mats[k].copyPartitionsFrom(base_real, &cc.bc);
-                cc.mats[k].addMassBlock(slices[n].M, slices[n].c_A, slices[n].c_b, slices[n].h, -cc.lam[k] / cc.dtau_T);
+                cc.mats[k].copyPartitionsFrom(base_real, &cc.bc, false);
+                cc.mats[k].addMassBlockSparse(slices[n].m_nnz, slices[n].m_rows, slices[n].m_cols, slices[n].m_vals, slices[n].c_A, slices[n].c_b, slices[n].h, -cc.lam[k] / cc.dtau_T, false);
                 cc.mats[k].factor();
             }
         }

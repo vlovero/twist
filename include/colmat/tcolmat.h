@@ -133,6 +133,17 @@ namespace DEV
         }
 
         template <typename data_t>
+        inline typename type_of_data<data_t>::type pivot_mag(const data_t &x)
+        {
+            if constexpr (is_complex<data_t>()) {
+                return std::abs(x.real()) + std::abs(x.imag());
+            }
+            else {
+                return std::abs(x);
+            }
+        }
+
+        template <typename data_t>
         void lacomp(const ptrdiff_t n, const ptrdiff_t m, const RP(data_t) A, const ptrdiff_t ldA, ptrdiff_t *ipiv, ptrdiff_t *jpiv)
         {
             ptrdiff_t i, j, imax, jmax;
@@ -143,7 +154,7 @@ namespace DEV
             dmax = 0;
             for (j = 0; j < m; j++) {
                 for (i = 0; i < n; i++) {
-                    tmp = std::abs(A[j * ldA + i]);
+                    tmp = pivot_mag(A[j * ldA + i]);
                     if (dmax < tmp) {
                         dmax = tmp;
                         imax = i;
@@ -173,7 +184,7 @@ namespace DEV
                 if (col) {
                     // get max and argmax for current column
                     for (j = 0; j < n; j++) {
-                        tmp = std::abs(A[jmax * ldA + j]);
+                        tmp = pivot_mag(A[jmax * ldA + j]);
                         if (refmax < tmp) {
                             itmp = j;
                             refmax = tmp;
@@ -191,7 +202,7 @@ namespace DEV
                 else {
                     // get max and argmax for current row
                     for (j = 0; j < m; j++) {
-                        tmp = std::abs(A[j * ldA + imax]);
+                        tmp = pivot_mag(A[j * ldA + imax]);
                         if (refmax < tmp) {
                             itmp = j;
                             refmax = tmp;
@@ -459,9 +470,9 @@ namespace DEV
                 const ptrdiff_t N = 2 * node + nparam;
                 m_node = node;
                 m_nparam = nparam;
-                m_ipiv = (int *)malloc(N * sizeof(int));
-                m_jpiv = (int *)malloc(N * sizeof(int));
-                m_final = (data_t *)malloc(N * N * sizeof(data_t));
+                m_ipiv = (int *)realloc(m_ipiv, N * sizeof(int));
+                m_jpiv = (int *)realloc(m_jpiv, N * sizeof(int));
+                m_final = (data_t *)realloc(m_final, N * N * sizeof(data_t));
             }
 
             ~FinalBlock()
@@ -535,8 +546,6 @@ namespace DEV
                 const ptrdiff_t N = 2 * m_node + m_nparam;
 
                 ptrdiff_t i;
-                int colperm[N];
-                data_t tmp[N];
 
                 memcpy(x, b, N * sizeof(data_t));
                 // row perm
@@ -545,18 +554,11 @@ namespace DEV
                 trsm<data_t>("L", "L", "N", "U", N, 1, 1.0, m_final, N, x, N);
                 // solve upper
                 trsm<data_t>("L", "U", "N", "N", N, 1, 1.0, m_final, N, x, N);
-                // col perm
-                for (i = 0; i < N; i++) {
-                    colperm[i] = i;
-                }
-                for (i = 0; i < N; i++) {
-                    std::swap(colperm[i], colperm[m_jpiv[i]]);
-                }
-                for (i = 0; i < N; i++) {
-                    tmp[colperm[i]] = x[i];
-                }
-                for (i = 0; i < N; i++) {
-                    x[i] = tmp[i];
+                // col perm (apply jpiv swaps in reverse in-place)
+                for (i = N - 1; i >= 0; i--) {
+                    if (m_jpiv[i] != i) {
+                        std::swap(x[i], x[m_jpiv[i]]);
+                    }
                 }
             }
 
@@ -565,8 +567,6 @@ namespace DEV
                 const ptrdiff_t N = 2 * m_node + m_nparam;
 
                 ptrdiff_t i, j;
-                int colperm[N];
-                data_t tmp[N];
 
                 lacpy("A", N, nrhs, b, ldbx, x, ldbx);
                 // row perm
@@ -575,19 +575,13 @@ namespace DEV
                 trsm<data_t>("L", "L", "N", "U", N, nrhs, 1.0, m_final, N, x, ldbx);
                 // solve upper
                 trsm<data_t>("L", "U", "N", "N", N, nrhs, 1.0, m_final, N, x, ldbx);
-                // col perm
-                for (i = 0; i < N; i++) {
-                    colperm[i] = i;
-                }
-                for (i = 0; i < N; i++) {
-                    std::swap(colperm[i], colperm[m_jpiv[i]]);
-                }
+                // col perm (apply jpiv swaps in reverse in-place)
                 for (j = 0; j < nrhs; j++) {
-                    for (i = 0; i < N; i++) {
-                        tmp[colperm[i]] = x[j * ldbx + i];
-                    }
-                    for (i = 0; i < N; i++) {
-                        x[j * ldbx + i] = tmp[i];
+                    data_t *xj = &x[j * ldbx];
+                    for (i = N - 1; i >= 0; i--) {
+                        if (m_jpiv[i] != i) {
+                            std::swap(xj[i], xj[m_jpiv[i]]);
+                        }
                     }
                 }
             }
@@ -785,43 +779,45 @@ namespace DEV
                 }
                 TWIST_MARK_END("fill in A");
 
-                // fill in C
-                // evaluate parameter jacobians first and transpose them
-                TWIST_MARK_BEGIN("compute pjac");
-                for (i = 0; i < ncol; i++) {
-                    pjac(&Y[i * node], p, pmask, nparam, &work[i * node2]);
-                }
-                TWIST_MARK_END("compute pjac");
-
-                // dFk/dc = 2T hk sum(c_b[i] fc(yk[i]))
-                TWIST_MARK_BEGIN("fill in C and B");
-                for (i = 0; i < ncol; i++) {
-                    scale = h * b_rk[i];
-                    jac_i = &work[i * node2];
-                    for (k = 0; k < nparam; k++) {
-                        for (l = 0; l < node; l++) {
-                            C[k * bsize + l] += scale * jac_i[l * nparam + k];
-                        }
-                    }
-                }
-
-                for (j = 0; j < ncol; j++) {
-                    Aview = &C[(j + 1) * node];
-                    // dHki/dc = 2T hk sum(a_ij fc(yk[j]))
+                // fill in C and B only when nparam > 0
+                if (nparam > 0) {
+                    // evaluate parameter jacobians first and transpose them
+                    TWIST_MARK_BEGIN("compute pjac");
                     for (i = 0; i < ncol; i++) {
-                        scale = h * A_rk[j * ncol + i];
+                        pjac(&Y[i * node], p, pmask, nparam, &work[i * node2]);
+                    }
+                    TWIST_MARK_END("compute pjac");
+
+                    // dFk/dc = 2T hk sum(c_b[i] fc(yk[i]))
+                    TWIST_MARK_BEGIN("fill in C and B");
+                    for (i = 0; i < ncol; i++) {
+                        scale = h * b_rk[i];
                         jac_i = &work[i * node2];
                         for (k = 0; k < nparam; k++) {
                             for (l = 0; l < node; l++) {
-                                Aview[k * bsize + l] += scale * jac_i[l * nparam + k];
+                                C[k * bsize + l] += scale * jac_i[l * nparam + k];
                             }
                         }
                     }
-                }
 
-                // fill in B
-                std::copy(prow, &prow[ncol * nparam * node], &B[node * nparam]);
-                TWIST_MARK_END("fill in C and B");
+                    for (j = 0; j < ncol; j++) {
+                        Aview = &C[(j + 1) * node];
+                        // dHki/dc = 2T hk sum(a_ij fc(yk[j]))
+                        for (i = 0; i < ncol; i++) {
+                            scale = h * A_rk[j * ncol + i];
+                            jac_i = &work[i * node2];
+                            for (k = 0; k < nparam; k++) {
+                                for (l = 0; l < node; l++) {
+                                    Aview[k * bsize + l] += scale * jac_i[l * nparam + k];
+                                }
+                            }
+                        }
+                    }
+
+                    // fill in B
+                    std::copy(prow, &prow[ncol * nparam * node], &B[node * nparam]);
+                    TWIST_MARK_END("fill in C and B");
+                }
             }
 
             // update routines from parents
@@ -838,12 +834,14 @@ namespace DEV
                 lacpy<data_t>("A", node, node, partition2->ALs(), partition1->ldA(), &A[node * (ldA() + 1)], ldA());
                 lacpy<data_t>("A", node, node, partition2->ARs(), partition1->ldA(), &A[ldA() * ldA() + node], ldA());
 
-                // copy C's
-                lacpy<data_t>("A", node, nparam, partition1->Cs(), partition1->ldA(), C, ldA());
-                lacpy<data_t>("A", node, nparam, partition2->Cs(), partition1->ldA(), &C[node], ldA());
+                if (nparam > 0) {
+                    // copy C's
+                    lacpy<data_t>("A", node, nparam, partition1->Cs(), partition1->ldA(), C, ldA());
+                    lacpy<data_t>("A", node, nparam, partition2->Cs(), partition1->ldA(), &C[node], ldA());
 
-                // copy B
-                lacpy<data_t>("A", nparam, node, prow, nparam, &B[node * nparam], nparam);
+                    // copy B
+                    lacpy<data_t>("A", nparam, node, prow, nparam, &B[node * nparam], nparam);
+                }
             }
 
             void update(const Partition<data_t> *partition1, const TrailingBlock<data_t> *trailing, const data_t *prow)
@@ -859,12 +857,14 @@ namespace DEV
                 lacpy<data_t>("A", node, node, trailing->AL, trailing->ldA, &A[node * (ldA() + 1)], ldA());
                 lacpy<data_t>("A", node, node, trailing->AR, trailing->ldA, &A[ldA() * ldA() + node], ldA());
 
-                // copy C's
-                lacpy<data_t>("A", node, nparam, partition1->Cs(), partition1->ldA(), C, ldA());
-                lacpy<data_t>("A", node, nparam, trailing->C, partition1->ldA(), &C[node], ldA());
+                if (nparam > 0) {
+                    // copy C's
+                    lacpy<data_t>("A", node, nparam, partition1->Cs(), partition1->ldA(), C, ldA());
+                    lacpy<data_t>("A", node, nparam, trailing->C, partition1->ldA(), &C[node], ldA());
 
-                // copy B
-                lacpy<data_t>("A", nparam, node, prow, nparam, &B[node * nparam], nparam);
+                    // copy B
+                    lacpy<data_t>("A", nparam, node, prow, nparam, &B[node * nparam], nparam);
+                }
             }
 
             // for debugging
@@ -955,8 +955,10 @@ namespace DEV
                 // apply permutations
                 laswpr(node, A, bsize, 0, bsize - node, ipiv, 1);
                 laswpr(node, &A[bsize * bsize], bsize, 0, bsize - node, ipiv, 1);
-                laswpr(nparam, C, bsize, 0, bsize - node, ipiv, 1);
-                laswpc(nparam, &B[node * nparam], nparam, 0, bsize - node, jpiv, 1);
+                if (nparam > 0) {
+                    laswpr(nparam, C, bsize, 0, bsize - node, ipiv, 1);
+                    laswpc(nparam, &B[node * nparam], nparam, 0, bsize - node, jpiv, 1);
+                }
                 TWIST_MARK_END("condense (swaps)");
 
                 TWIST_MARK_BEGIN("condense blas ops");
@@ -966,23 +968,25 @@ namespace DEV
                 // apply operations to A (right)
                 trsm<data_t>("L", "L", "N", "U", bsize - node, node, 1.0, LU, bsize, &A[bsize * bsize], bsize);
                 gemm<data_t>("N", "N", node, node, bsize - node, -1.0, &LU[bsize - node], bsize, &A[bsize * bsize], bsize, 1.0, &A[bsize * bsize + (bsize - node)], bsize);
-                // apply operations to C
-                trsm<data_t>("L", "L", "N", "U", bsize - node, nparam, 1.0, LU, bsize, C, bsize);
-                gemm<data_t>("N", "N", node, nparam, bsize - node, -1.0, &LU[bsize - node], bsize, C, bsize, 1.0, &C[bsize - node], bsize);
-                // factor B
-                trsm<data_t>("R", "U", "N", "N", nparam, bsize - node, 1.0, LU, bsize, &B[node * nparam], nparam);
+                if (nparam > 0) {
+                    // apply operations to C
+                    trsm<data_t>("L", "L", "N", "U", bsize - node, nparam, 1.0, LU, bsize, C, bsize);
+                    gemm<data_t>("N", "N", node, nparam, bsize - node, -1.0, &LU[bsize - node], bsize, C, bsize, 1.0, &C[bsize - node], bsize);
+                    // factor B
+                    trsm<data_t>("R", "U", "N", "N", nparam, bsize - node, 1.0, LU, bsize, &B[node * nparam], nparam);
 
-                // D, V, and W are shared between partitions
-                // so the condense method assumes it to be zero
-                // so that after condensation is done, the first
-                // subsystem can be formed by adding them all up
+                    // D, V, and W are shared between partitions
+                    // so the condense method assumes it to be zero
+                    // so that after condensation is done, the first
+                    // subsystem can be formed by adding them all up
 
-                // factor D
-                gemm<data_t>("N", "N", nparam, nparam, bsize - node, -1.0, &B[node * nparam], nparam, C, bsize, 0.0, D, nparam);
-                // factor left of B (V)
-                gemm<data_t>("N", "N", nparam, node, bsize - node, -1.0, &B[node * nparam], nparam, A, bsize, 0.0, B, nparam);
-                // factor right of B (W)
-                gemm<data_t>("N", "N", nparam, node, bsize - node, -1.0, &B[node * nparam], nparam, &A[bsize * bsize], bsize, 0.0, &B[bsize * nparam], nparam);
+                    // factor D
+                    gemm<data_t>("N", "N", nparam, nparam, bsize - node, -1.0, &B[node * nparam], nparam, C, bsize, 0.0, D, nparam);
+                    // factor left of B (V)
+                    gemm<data_t>("N", "N", nparam, node, bsize - node, -1.0, &B[node * nparam], nparam, A, bsize, 0.0, B, nparam);
+                    // factor right of B (W)
+                    gemm<data_t>("N", "N", nparam, node, bsize - node, -1.0, &B[node * nparam], nparam, &A[bsize * bsize], bsize, 0.0, &B[bsize * nparam], nparam);
+                }
                 TWIST_MARK_END("condense blas ops");
             }
 
@@ -1000,8 +1004,10 @@ namespace DEV
                 trsm<data_t>("L", "L", "N", "U", bsize - node, 1, 1.0, LU, bsize, Fx, nx);
                 // eliminate remaining block
                 gemm<data_t>("N", "N", node, 1, bsize - node, -1.0, &LU[bsize - node], bsize, Fx, nx, 1.0, &Fx[bsize - node], nx);
-                // eliminate last nparam rows
-                gemm<data_t>("N", "N", nparam, 1, bsize - node, -1.0, &B[node * nparam], nparam, Fx, nx, 1.0, Fd, nx);
+                if (nparam > 0) {
+                    // eliminate last nparam rows
+                    gemm<data_t>("N", "N", nparam, 1, bsize - node, -1.0, &B[node * nparam], nparam, Fx, nx, 1.0, Fd, nx);
+                }
             }
 
             void condenseVector(const ptrdiff_t nrhs, RP(data_t) x, const ptrdiff_t nx, const ptrdiff_t partition_num) const
@@ -1017,15 +1023,17 @@ namespace DEV
                 trsm<data_t>("L", "L", "N", "U", bsize - node, nrhs, 1.0, LU, bsize, Fx, nx);
                 // eliminate remaining block
                 gemm<data_t>("N", "N", node, nrhs, bsize - node, -1.0, &LU[bsize - node], bsize, Fx, nx, 1.0, &Fx[bsize - node], nx);
-                // eliminate last nparam rows
-                gemm<data_t>("N", "N", nparam, nrhs, bsize - node, -1.0, &B[node * nparam], nparam, Fx, nx, 1.0, Fd, nx);
+                if (nparam > 0) {
+                    // eliminate last nparam rows
+                    gemm<data_t>("N", "N", nparam, nrhs, bsize - node, -1.0, &B[node * nparam], nparam, Fx, nx, 1.0, Fd, nx);
+                }
             }
 
             void backsubstitute(RP(data_t) x, RP(data_t) y, const ptrdiff_t nx, const ptrdiff_t partition_num) const
             {
                 ptrdiff_t i;
                 const data_t *LU = &A[bsize * node];
-                int colperm[bsize - node];
+                const ptrdiff_t len = bsize - node;
 
                 data_t *R = &y[partition_num * bsize];
                 data_t *xL = &x[partition_num * bsize];
@@ -1033,32 +1041,26 @@ namespace DEV
                 data_t *xR = xL + bsize;
                 data_t *K = &x[nx - nparam];
 
-                gemv<data_t>("N", bsize - node, node, -1.0, A, bsize, xL, 1, 1.0, R, 1);
-                gemv<data_t>("N", bsize - node, node, -1.0, &A[bsize * bsize], bsize, xR, 1, 1.0, R, 1);
-                gemv<data_t>("N", bsize - node, nparam, -1.0, C, bsize, K, 1, 1.0, R, 1);
-                memcpy(xC, R, (bsize - node) * 1 * sizeof(data_t));
-                trsm<data_t>("L", "U", "N", "N", bsize - node, 1, 1.0, LU, bsize, xC, nx);
+                gemv<data_t>("N", len, node, -1.0, A, bsize, xL, 1, 1.0, R, 1);
+                gemv<data_t>("N", len, node, -1.0, &A[bsize * bsize], bsize, xR, 1, 1.0, R, 1);
+                if (nparam > 0) {
+                    gemv<data_t>("N", len, nparam, -1.0, C, bsize, K, 1, 1.0, R, 1);
+                }
+                memcpy(xC, R, len * sizeof(data_t));
+                trsm<data_t>("L", "U", "N", "N", len, 1, 1.0, LU, bsize, xC, nx);
 
-                for (i = 0; i < (bsize - node); i++) {
-                    colperm[i] = i;
-                }
-                for (i = 0; i < (bsize - node); i++) {
-                    std::swap(colperm[i], colperm[jpiv[i]]);
-                }
-                for (i = 0; i < (bsize - node); i++) {
-                    R[colperm[i]] = xC[i];
-                }
-                for (i = 0; i < (bsize - node); i++) {
-                    xC[i] = R[i];
+                for (i = len - 1; i >= 0; i--) {
+                    if (jpiv[i] != i) {
+                        std::swap(xC[i], xC[jpiv[i]]);
+                    }
                 }
             }
 
             void backsubstitute(const ptrdiff_t nrhs, RP(data_t) x, RP(data_t) y, const ptrdiff_t nx, const ptrdiff_t partition_num) const
             {
-                // throw std::runtime_error(fmt::format("{} not implemented", __PRETTY_FUNCTION__));
                 ptrdiff_t i, j;
                 const data_t *LU = &A[bsize * node];
-                int colperm[bsize - node];
+                const ptrdiff_t len = bsize - node;
 
                 data_t *R = &y[partition_num * bsize];
                 data_t *xL = &x[partition_num * bsize];
@@ -1066,29 +1068,20 @@ namespace DEV
                 data_t *xR = xL + bsize;
                 data_t *K = &x[nx - nparam];
 
-                // gemv<data_t>("N", bsize - node, node, -1.0, A, bsize, xL, 1, 1.0, R, 1);
-                DEV::linalg::gemm<data_t>("N", "N", bsize - node, nrhs, node, -1.0, A, bsize, xL, nx, 1.0, R, nx);
-                // gemv<data_t>("N", bsize - node, node, -1.0, &A[bsize * bsize], bsize, xR, 1, 1.0, R, 1);
-                DEV::linalg::gemm<data_t>("N", "N", bsize - node, nrhs, node, -1.0, &A[bsize * bsize], bsize, xR, nx, 1.0, R, nx);
-                // gemv<data_t>("N", bsize - node, nparam, -1.0, C, bsize, K, 1, 1.0, R, 1);
-                DEV::linalg::gemm<data_t>("N", "N", bsize - node, nrhs, nparam, -1.0, C, bsize, K, nx, 1.0, R, nx);
-                // memcpy(xC, R, (bsize - node) * 1 * sizeof(data_t));
-                lacpy("A", bsize - node, nrhs, R, nx, xC, nx);
-                trsm<data_t>("L", "U", "N", "N", bsize - node, nrhs, 1.0, LU, bsize, xC, nx);
-
-                for (i = 0; i < (bsize - node); i++) {
-                    colperm[i] = i;
+                DEV::linalg::gemm<data_t>("N", "N", len, nrhs, node, -1.0, A, bsize, xL, nx, 1.0, R, nx);
+                DEV::linalg::gemm<data_t>("N", "N", len, nrhs, node, -1.0, &A[bsize * bsize], bsize, xR, nx, 1.0, R, nx);
+                if (nparam > 0) {
+                    DEV::linalg::gemm<data_t>("N", "N", len, nrhs, nparam, -1.0, C, bsize, K, nx, 1.0, R, nx);
                 }
-                for (i = 0; i < (bsize - node); i++) {
-                    std::swap(colperm[i], colperm[jpiv[i]]);
-                }
+                lacpy("A", len, nrhs, R, nx, xC, nx);
+                trsm<data_t>("L", "U", "N", "N", len, nrhs, 1.0, LU, bsize, xC, nx);
 
                 for (j = 0; j < nrhs; j++) {
-                    for (i = 0; i < (bsize - node); i++) {
-                        R[colperm[i] + j * nx] = xC[i + j * nx];
-                    }
-                    for (i = 0; i < (bsize - node); i++) {
-                        xC[i + j * nx] = R[i + j * nx];
+                    data_t *xCj = &xC[j * nx];
+                    for (i = len - 1; i >= 0; i--) {
+                        if (jpiv[i] != i) {
+                            std::swap(xCj[i], xCj[jpiv[i]]);
+                        }
                     }
                 }
             }
@@ -1131,6 +1124,7 @@ namespace DEV
             data_t *m_prows = nullptr;
             data_t *m_D = nullptr;
             data_t *m_work = nullptr;
+            ptrdiff_t m_work_cap = 0;
             SubsystemMatrix<data_t> *m_child = nullptr;
             FinalBlock<data_t> *m_final = nullptr;
             TrailingBlock<data_t> *m_trailing = nullptr;
@@ -1159,6 +1153,7 @@ namespace DEV
                 if (m_work) {
                     free(m_work);
                     m_work = nullptr;
+                    m_work_cap = 0;
                 }
                 if (m_child) {
                     delete m_child;
@@ -1191,15 +1186,17 @@ namespace DEV
                 reserve(parent);
 
                 // start copying everything
-                // copy prows
-                // collocation matrix prows has everything so the
-                // stride will be nparam * node * (ncol + 1)
-                for (i = 0; i < m_ngrid; i++) {
-                    memcpy(&m_prows[i * m_node * m_nparam], &parent_prows[i * m_nparam * parent_stride], m_node * m_nparam * sizeof(data_t));
-                }
+                if (m_nparam > 0) {
+                    // copy prows
+                    // collocation matrix prows has everything so the
+                    // stride will be nparam * node * (ncol + 1)
+                    for (i = 0; i < m_ngrid; i++) {
+                        memcpy(&m_prows[i * m_node * m_nparam], &parent_prows[i * m_nparam * parent_stride], m_node * m_nparam * sizeof(data_t));
+                    }
 
-                // copy D
-                memcpy(m_D, parent->m_D, (m_nparam * m_nparam) * sizeof(data_t));
+                    // copy D
+                    memcpy(m_D, parent->m_D, (m_nparam * m_nparam) * sizeof(data_t));
+                }
 
                 // fill in blocks
                 for (i = 0; i < m_nblocks; i++) {
@@ -1207,7 +1204,7 @@ namespace DEV
                     Partition<data_t> *b2 = parent->m_partitions + (2 * i + 1);
                     Partition<data_t> *partition = m_partitions + i;
 
-                    partition->update(b1, b2, &m_prows[(2 * i + 1) * m_nparam * m_node]);
+                    partition->update(b1, b2, m_nparam > 0 ? &m_prows[(2 * i + 1) * m_nparam * m_node] : nullptr);
                 }
 
                 m_bc = parent->m_bc;
@@ -1224,17 +1221,18 @@ namespace DEV
                 reserve(parent);
 
                 // start copying everything
+                if (m_nparam > 0) {
+                    // copy prows
+                    for (j = 0, i = 0; i < parent->m_ngrid; i += 2, j++) {
+                        memcpy(&m_prows[j * m_node * m_nparam], &parent_prows[(2 * j + 0) * m_nparam * m_node], m_node * m_nparam * sizeof(data_t));
+                    }
+                    if ((2 * parent->m_nblocks + parent->hasTrailing()) & 1) {
+                        memcpy(&m_prows[(m_ngrid - 1) * m_node * m_nparam], &parent_prows[(parent->m_ngrid - 1) * m_node * m_nparam], m_node * m_nparam * sizeof(data_t));
+                    }
 
-                // copy prows
-                for (j = 0, i = 0; i < parent->m_ngrid; i += 2, j++) {
-                    memcpy(&m_prows[j * m_node * m_nparam], &parent_prows[(2 * j + 0) * m_nparam * m_node], m_node * m_nparam * sizeof(data_t));
+                    // copy D
+                    memcpy(m_D, parent->m_D, m_nparam * m_nparam * sizeof(data_t));
                 }
-                if ((2 * parent->m_nblocks + parent->hasTrailing()) & 1) {
-                    memcpy(&m_prows[(m_ngrid - 1) * m_node * m_nparam], &parent_prows[(parent->m_ngrid - 1) * m_node * m_nparam], m_node * m_nparam * sizeof(data_t));
-                }
-
-                // copy D
-                memcpy(m_D, parent->m_D, m_nparam * m_nparam * sizeof(data_t));
 
                 // update blocks
                 for (i = 0; i < (m_nblocks - (parent->hasTrailing() && !hasTrailing())); i++) {
@@ -1242,8 +1240,7 @@ namespace DEV
                     Partition<data_t> *partition1 = &parent->m_partitions[2 * i + 0];
                     Partition<data_t> *partition2 = &parent->m_partitions[2 * i + 1];
 
-                    partition->update(partition1, partition2, &m_prows[(2 * i + 1) * m_node * m_nparam]);
-                    ;
+                    partition->update(partition1, partition2, m_nparam > 0 ? &m_prows[(2 * i + 1) * m_node * m_nparam] : nullptr);
                 }
 
                 if (hasTrailing() && parent->hasTrailing()) {
@@ -1481,7 +1478,11 @@ namespace DEV
 
             void resizeWork(const ptrdiff_t nrhs = 1)
             {
-                m_work = (data_t *)realloc(m_work, nrhs * 3 * (m_node * m_ngrid + m_nparam) * sizeof(data_t));
+                const ptrdiff_t needed = nrhs * 3 * (m_node * m_ngrid + m_nparam);
+                if (needed > m_work_cap) {
+                    m_work = (data_t *)realloc(m_work, needed * sizeof(data_t));
+                    m_work_cap = needed;
+                }
             }
 
             void updateJustBC(const BoundaryConditionsBlocks<data_t> *bc)
@@ -1508,28 +1509,30 @@ namespace DEV
                     return;
                 }
 
-#pragma omp parallel for private(i, block) num_threads(std::min(2, omp_get_num_threads()))
+#pragma omp parallel for private(i, block) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     block = &m_partitions[i];
                     block->condense();
                 }
 
-                for (i = 0; i < m_nblocks; i++) {
-                    block = &m_partitions[i];
+                if (m_nparam > 0) {
+                    for (i = 0; i < m_nblocks; i++) {
+                        block = &m_partitions[i];
 
-                    prow0 = &m_prows[2 * (i + 0) * m_node * m_nparam];
-                    prow1 = &m_prows[2 * (i + 1) * m_node * m_nparam];
+                        prow0 = &m_prows[2 * (i + 0) * m_node * m_nparam];
+                        prow1 = &m_prows[2 * (i + 1) * m_node * m_nparam];
 
-                    // update parameter rows
-                    for (j = 0; j < m_node; j++) {
-                        for (k = 0; k < m_nparam; k++) {
-                            prow0[j * m_nparam + k] += block->B[(j + 0 * m_node) * m_nparam + k];
-                            prow1[j * m_nparam + k] += block->B[(j + 2 * m_node) * m_nparam + k];
+                        // update parameter rows
+                        for (j = 0; j < m_node; j++) {
+                            for (k = 0; k < m_nparam; k++) {
+                                prow0[j * m_nparam + k] += block->B[(j + 0 * m_node) * m_nparam + k];
+                                prow1[j * m_nparam + k] += block->B[(j + 2 * m_node) * m_nparam + k];
+                            }
                         }
-                    }
-                    // update D block
-                    for (j = 0; j < m_nparam * m_nparam; j++) {
-                        m_D[j] += block->D[j];
+                        // update D block
+                        for (j = 0; j < m_nparam * m_nparam; j++) {
+                            m_D[j] += block->D[j];
+                        }
                     }
                 }
 
@@ -1684,6 +1687,7 @@ namespace DEV
         {
             ptrdiff_t m_nblocks = 0;
             ptrdiff_t m_cap = 0;
+            ptrdiff_t m_mm_cap = 0;
             Partition<data_t> *m_partitions = nullptr;
             Partition<data_t> *m_partitions_mm = nullptr;
             BoundaryConditionsBlocks<data_t> *m_bc = nullptr;
@@ -1692,6 +1696,7 @@ namespace DEV
             data_t *m_prows = nullptr;
             data_t *m_D = nullptr;
             data_t *m_work = nullptr;
+            ptrdiff_t m_work_cap = 0;
             Info m_info;
 
             CollocationMatrix() = default;
@@ -1707,7 +1712,7 @@ namespace DEV
                     m_partitions = NULL;
                 }
                 if (m_partitions_mm) {
-                    for (i = 0; i < m_cap; i++) {
+                    for (i = 0; i < m_mm_cap; i++) {
                         (m_partitions_mm + i)->~Partition();
                     }
                     free(m_partitions_mm);
@@ -1716,6 +1721,7 @@ namespace DEV
                 if (m_work) {
                     free(m_work);
                     m_work = nullptr;
+                    m_work_cap = 0;
                 }
                 if (m_prows) {
                     free(m_prows);
@@ -1735,6 +1741,7 @@ namespace DEV
                 }
                 m_nblocks = 0;
                 m_cap = 0;
+                m_mm_cap = 0;
                 m_info.clearAll();
             }
 
@@ -1756,16 +1763,21 @@ namespace DEV
                 nblocks = ngrid - 1;
 
                 // reallocate memory if needed
-                if ((nblocks != m_nblocks) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (nparam != m_partitions->nparam)) {
+                if ((nblocks != m_nblocks) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (nparam != m_partitions->nparam) || (m_partitions_mm == nullptr)) {
                     // blocks
                     if (m_cap < nblocks) {
                         m_partitions = (Partition<data_t> *)realloc(m_partitions, nblocks * sizeof(Partition<data_t>));
-                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
                         for (i = m_cap; i < nblocks; i++) {
                             m_partitions[i] = std::move(Partition<data_t>());
-                            m_partitions_mm[i] = std::move(Partition<data_t>());
                         }
                         m_cap = nblocks;
+                    }
+                    if (m_mm_cap < nblocks) {
+                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
+                        for (i = m_mm_cap; i < nblocks; i++) {
+                            m_partitions_mm[i] = std::move(Partition<data_t>());
+                        }
+                        m_mm_cap = nblocks;
                     }
                     m_nblocks = nblocks;
                     for (i = 0; i < nblocks; i++) {
@@ -1776,10 +1788,11 @@ namespace DEV
                     }
 
                     // prows
-                    m_prows = (data_t *)realloc(m_prows, nparam * (nblocks * node * (ncol + 1) + node) * sizeof(data_t));
-                    // D
-                    m_D = (data_t *)realloc(m_D, nparam * nparam * sizeof(data_t));
-                    m_V_mm = (data_t *)realloc(m_V_mm, nparam * size() * sizeof(data_t));
+                    if (nparam > 0) {
+                        m_prows = (data_t *)realloc(m_prows, nparam * (nblocks * node * (ncol + 1) + node) * sizeof(data_t));
+                        m_D = (data_t *)realloc(m_D, nparam * nparam * sizeof(data_t));
+                        m_V_mm = (data_t *)realloc(m_V_mm, nparam * size() * sizeof(data_t));
+                    }
                     // work
                     resizeWork();
                 }
@@ -1798,7 +1811,7 @@ namespace DEV
                     Partition<data_t> *partition = &m_partitions[i];
                     Partition<data_t> *partition_mm = &m_partitions_mm[i];
                     Yi = &y[i * node * (ncol + 1) + node];
-                    prowi = &V[i * nparam * (node * (ncol + 1)) + node * nparam];
+                    prowi = (nparam > 0) ? &V[i * nparam * (node * (ncol + 1)) + node * nparam] : nullptr;
                     partition->update(fjac, pjac, node, ncol, nparam, L * h[i], Yi, p, pmask, prowi, local_work);
                     partition_mm->fill(*partition);
                 }
@@ -1807,7 +1820,7 @@ namespace DEV
                 m_info.clearFactored();
             }
 
-            void copyPartitionsFrom(const CollocationMatrix<double> &src, BoundaryConditionsBlocks<data_t> *bc)
+            void copyPartitionsFrom(const CollocationMatrix<double> &src, BoundaryConditionsBlocks<data_t> *bc, bool keep_mm = true)
             {
                 ptrdiff_t i;
                 const ptrdiff_t nblocks = src.m_nblocks;
@@ -1816,25 +1829,44 @@ namespace DEV
                 const ptrdiff_t nparam = src.m_partitions->nparam;
                 const ptrdiff_t bsize = src.m_partitions->bsize;
                 const ptrdiff_t A_len = bsize * (bsize + node);
+                const Partition<double> *src_parts = src.m_partitions_mm ? src.m_partitions_mm : src.m_partitions;
 
-                if ((nblocks != m_nblocks) || (m_partitions == nullptr) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (nparam != m_partitions->nparam)) {
+                if (!keep_mm && m_partitions_mm != nullptr) {
+                    for (i = 0; i < m_mm_cap; i++) {
+                        (m_partitions_mm + i)->~Partition();
+                    }
+                    free(m_partitions_mm);
+                    m_partitions_mm = nullptr;
+                    m_mm_cap = 0;
+                }
+
+                if ((nblocks != m_nblocks) || (m_partitions == nullptr) || (node != m_partitions->node) || (ncol != ((m_partitions->bsize / node) - 1)) || (nparam != m_partitions->nparam) || (keep_mm && m_partitions_mm == nullptr)) {
                     if (m_cap < nblocks) {
                         m_partitions = (Partition<data_t> *)realloc(m_partitions, nblocks * sizeof(Partition<data_t>));
-                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
                         for (i = m_cap; i < nblocks; i++) {
                             m_partitions[i] = std::move(Partition<data_t>());
-                            m_partitions_mm[i] = std::move(Partition<data_t>());
                         }
                         m_cap = nblocks;
+                    }
+                    if (keep_mm && m_mm_cap < nblocks) {
+                        m_partitions_mm = (Partition<data_t> *)realloc(m_partitions_mm, nblocks * sizeof(Partition<data_t>));
+                        for (i = m_mm_cap; i < nblocks; i++) {
+                            m_partitions_mm[i] = std::move(Partition<data_t>());
+                        }
+                        m_mm_cap = nblocks;
                     }
                     m_nblocks = nblocks;
                     for (i = 0; i < nblocks; i++) {
                         m_partitions[i].emptyPartition(ncol, node, nparam);
-                        m_partitions_mm[i].emptyPartition(ncol, node, nparam);
+                        if (keep_mm) {
+                            m_partitions_mm[i].emptyPartition(ncol, node, nparam);
+                        }
                     }
-                    m_prows = (data_t *)realloc(m_prows, nparam * (nblocks * node * (ncol + 1) + node) * sizeof(data_t));
-                    m_D = (data_t *)realloc(m_D, nparam * nparam * sizeof(data_t));
-                    m_V_mm = (data_t *)realloc(m_V_mm, nparam * size() * sizeof(data_t));
+                    if (nparam > 0) {
+                        m_prows = (data_t *)realloc(m_prows, nparam * (nblocks * node * (ncol + 1) + node) * sizeof(data_t));
+                        m_D = (data_t *)realloc(m_D, nparam * nparam * sizeof(data_t));
+                        m_V_mm = (data_t *)realloc(m_V_mm, nparam * size() * sizeof(data_t));
+                    }
                     resizeWork();
                 }
 
@@ -1854,32 +1886,43 @@ namespace DEV
 
                 for (i = 0; i < m_nblocks; i++) {
                     if constexpr (std::is_same_v<data_t, double>) {
-                        memcpy(m_partitions[i].A, src.m_partitions_mm[i].A, A_len * sizeof(double));
+                        memcpy(m_partitions[i].A, src_parts[i].A, A_len * sizeof(double));
                     }
                     else {
-                        const double *srcA = src.m_partitions_mm[i].A;
+                        const double *srcA = src_parts[i].A;
                         data_t *dstA = m_partitions[i].A;
                         for (ptrdiff_t q = 0; q < A_len; q++) {
                             dstA[q] = data_t(srcA[q], 0.0);
                         }
                     }
-                    m_partitions_mm[i].fill(m_partitions[i]);
+                    if (nparam > 0) {
+                        // Also copy B and C if nparam > 0
+                        const ptrdiff_t b_len = nparam * (bsize + node);
+                        const ptrdiff_t c_len = bsize * nparam;
+                        for (ptrdiff_t q = 0; q < b_len; q++) m_partitions[i].B[q] = (data_t)src_parts[i].B[q];
+                        for (ptrdiff_t q = 0; q < c_len; q++) m_partitions[i].C[q] = (data_t)src_parts[i].C[q];
+                        for (ptrdiff_t q = 0; q < nparam * nparam; q++) m_partitions[i].D[q] = (data_t)src_parts[i].D[q];
+                    }
+                    if (keep_mm) {
+                        m_partitions_mm[i].fill(m_partitions[i]);
+                    }
                 }
 
                 m_info.clearFactored();
             }
 
-            void addMassBlock(const double *M, const double *A_rk, const double *b_rk, const double *h, const data_t scale)
+            void addMassBlock(const double *M, const double *A_rk, const double *b_rk, const double *h, const data_t scale, bool update_mm = true)
             {
                 ptrdiff_t block_idx, i, j, k, l;
                 const ptrdiff_t node = m_partitions->node;
                 const ptrdiff_t nstages = (m_partitions->bsize / node) - 1;
                 const ptrdiff_t ldblock = m_partitions->ldA();
+                const bool do_mm = update_mm && (m_partitions_mm != nullptr);
 
                 for (block_idx = 0; block_idx < m_nblocks; block_idx++) {
                     const data_t mu = scale * h[block_idx];
                     data_t *A_blk = m_partitions[block_idx].A;
-                    data_t *Amm_blk = m_partitions_mm[block_idx].A;
+                    data_t *Amm_blk = do_mm ? m_partitions_mm[block_idx].A : nullptr;
 
                     for (i = 0; i < nstages; i++) {
                         for (j = 0; j < node; j++) {
@@ -1887,7 +1930,9 @@ namespace DEV
                                 const data_t val = mu * b_rk[i] * M[j * node + k];
                                 const ptrdiff_t idx = ((i + 1) * node + j) * ldblock + k;
                                 A_blk[idx] += val;
-                                Amm_blk[idx] += val;
+                                if (do_mm) {
+                                    Amm_blk[idx] += val;
+                                }
                             }
                         }
                     }
@@ -1899,7 +1944,48 @@ namespace DEV
                                     const data_t val = a_ji * M[k * node + l];
                                     const ptrdiff_t idx = ((i + 1) * node + k) * ldblock + (j + 1) * node + l;
                                     A_blk[idx] += val;
-                                    Amm_blk[idx] += val;
+                                    if (do_mm) {
+                                        Amm_blk[idx] += val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                m_info.clearFactored();
+            }
+
+            void addMassBlockSparse(size_t nnz, const int *rows, const int *cols, const double *vals, const double *A_rk, const double *b_rk, const double *h, const data_t scale, bool update_mm = true)
+            {
+                const ptrdiff_t node = m_partitions->node;
+                const ptrdiff_t nstages = (m_partitions->bsize / node) - 1;
+                const ptrdiff_t ldblock = m_partitions->ldA();
+                const bool do_mm = update_mm && (m_partitions_mm != nullptr);
+
+                for (ptrdiff_t block_idx = 0; block_idx < m_nblocks; block_idx++) {
+                    const data_t mu = scale * h[block_idx];
+                    data_t *A_blk = m_partitions[block_idx].A;
+                    data_t *Amm_blk = do_mm ? m_partitions_mm[block_idx].A : nullptr;
+
+                    for (size_t nz = 0; nz < nnz; nz++) {
+                        const ptrdiff_t r = (ptrdiff_t)rows[nz];
+                        const ptrdiff_t c = (ptrdiff_t)cols[nz];
+                        const data_t mv = mu * vals[nz];
+                        for (ptrdiff_t i = 0; i < nstages; i++) {
+                            const ptrdiff_t col = (i + 1) * node + c;
+                            const ptrdiff_t idx_top = col * ldblock + r;
+                            const data_t v_top = mv * b_rk[i];
+                            A_blk[idx_top] += v_top;
+                            if (do_mm) {
+                                Amm_blk[idx_top] += v_top;
+                            }
+                            for (ptrdiff_t j = 0; j < nstages; j++) {
+                                const ptrdiff_t idx = col * ldblock + (j + 1) * node + r;
+                                const data_t v_st = mv * A_rk[j * nstages + i];
+                                A_blk[idx] += v_st;
+                                if (do_mm) {
+                                    Amm_blk[idx] += v_st;
                                 }
                             }
                         }
@@ -1935,20 +2021,22 @@ namespace DEV
                 TWIST_MARK_END("condense");
 
                 TWIST_MARK_BEGIN("update overlap");
-                // need to benchmark this under openmp critical section
-                for (i = 0; i < m_nblocks; i++) {
-                    // update prows and D
-                    Partition<data_t> *partition = &m_partitions[i];
-                    prow1 = &m_prows[(i + 0) * nparam * bsize];
-                    prow2 = &m_prows[(i + 1) * nparam * bsize];
-                    for (j = 0; j < node; j++) {
-                        for (k = 0; k < nparam; k++) {
-                            prow1[j * nparam + k] += partition->B[(j + 0 * bsize) * nparam + k];
-                            prow2[j * nparam + k] += partition->B[(j + 1 * bsize) * nparam + k];
+                if (nparam > 0) {
+                    // need to benchmark this under openmp critical section
+                    for (i = 0; i < m_nblocks; i++) {
+                        // update prows and D
+                        Partition<data_t> *partition = &m_partitions[i];
+                        prow1 = &m_prows[(i + 0) * nparam * bsize];
+                        prow2 = &m_prows[(i + 1) * nparam * bsize];
+                        for (j = 0; j < node; j++) {
+                            for (k = 0; k < nparam; k++) {
+                                prow1[j * nparam + k] += partition->B[(j + 0 * bsize) * nparam + k];
+                                prow2[j * nparam + k] += partition->B[(j + 1 * bsize) * nparam + k];
+                            }
                         }
-                    }
-                    for (j = 0; j < (nparam * nparam); j++) {
-                        m_D[j] += partition->D[j];
+                        for (j = 0; j < (nparam * nparam); j++) {
+                            m_D[j] += partition->D[j];
+                        }
                     }
                 }
                 TWIST_MARK_END("update overlap");
@@ -1972,10 +2060,10 @@ namespace DEV
                 ptrdiff_t lwork = getLWork(nrhs);
                 ptrdiff_t update_lwork = omp_get_max_threads() * m_partitions->node * m_partitions->ldA();
                 lwork = std::max(lwork, update_lwork);
-                // lwork = std::max(lwork, omp_get_max_threads() * ncol * node * std::max(node, nparam));
-
-                // work needs to be 2 * N + 2 * M
-                m_work = (data_t *)realloc(m_work, lwork * sizeof(data_t));
+                if (lwork > m_work_cap) {
+                    m_work = (data_t *)realloc(m_work, lwork * sizeof(data_t));
+                    m_work_cap = lwork;
+                }
             }
 
             ptrdiff_t size() const
@@ -2027,25 +2115,26 @@ namespace DEV
                 // solve subsystem Sw = v
                 m_S->solve(v, w);
 
-                // NOTE: sometimes when nparam > 1, solver will need 1 iteration of BiCGStab
-                // This is likely a bug in the code somewhere, but I wasn't able to track it
-                // down and this is chdeap and it seems (for my tests) to have a universal
-                // iteration bound of one
-                auto A_Op = [this](const data_t *in, data_t *out, size_t) {
-                    sgemv(0.0, out, 1.0, in);
-                    return 0;
-                };
-                auto M_Op = [this](const data_t *in, data_t *out, size_t) {
-                    m_S->solve(in, out);
-                    return 0;
-                };
-                Krylov::bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, Ns, w, v, &m_work[3 * N], 10, Ns * std::pow(0.5, 52), std::pow(0.5, 104), std::pow(0.5, 104), &niters, false);
+                // Iterative refinement is only needed when nparam > 0 (nparam == 0 cyclic reduction is exact)
+                if (nparam > 0) {
+                    auto A_Op = [this](const data_t *in, data_t *out, size_t) {
+                        sgemv(0.0, out, 1.0, in);
+                        return 0;
+                    };
+                    auto M_Op = [this](const data_t *in, data_t *out, size_t) {
+                        m_S->solve(in, out);
+                        return 0;
+                    };
+                    Krylov::bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, Ns, w, v, &m_work[3 * N], 10, Ns * std::pow(0.5, 52), std::pow(0.5, 104), std::pow(0.5, 104), &niters, false);
+                }
 
                 // copy results into x
                 for (i = 0; i < (m_nblocks + 1); i++) {
                     memcpy(&x[i * bsize], &w[i * node], node * sizeof(data_t));
                 }
-                memcpy(&x[N - nparam], &w[Ns - nparam], nparam * sizeof(data_t));
+                if (nparam > 0) {
+                    memcpy(&x[N - nparam], &w[Ns - nparam], nparam * sizeof(data_t));
+                }
 
                 // back substitution on final blocks and inverse column swaps
 #pragma omp parallel for private(i) firstprivate(x, y, N) if (m_nblocks >= 64)
@@ -2061,7 +2150,7 @@ namespace DEV
                 const ptrdiff_t node = m_partitions->node;
                 const ptrdiff_t M = size();
                 const ptrdiff_t N = (m_nblocks + 1) * node + nparam;
-                if (nrhs > 1) {
+                if (nrhs > 1 && nparam > 0) {
                     using fake_t = int (*)(const data_t *, data_t *, size_t, size_t);
                     int lwork = -1;
                     Krylov::block_bicgstab<fake_t, fake_t, data_t>(NULL, NULL, size(), nrhs, NULL, NULL, NULL, lwork, 0, 0.0, 0.0, NULL, false);
@@ -2081,7 +2170,6 @@ namespace DEV
                 const ptrdiff_t bsize = m_partitions->bsize;
                 const ptrdiff_t N = size();
                 const ptrdiff_t Ns = (m_nblocks + 1) * node + nparam;
-                int lwork = getLWork(nrhs) - 3 * N * nrhs;
                 OpenBLASThreadContext __openblas_context(1);
 
                 if (nrhs == 1) {
@@ -2106,11 +2194,9 @@ namespace DEV
                     const Partition<data_t> &partition = m_partitions[i];
                     partition.condenseVector(nrhs, x, N, i);
                     // copy condensed rhs node section into subsystem RHS
-                    // memcpy(&v[i * node], &x[(i + 1) * bsize - node], node * sizeof(data_t));
                     lacpy("A", node, nrhs, &x[(i + 1) * bsize - node], N, &v[i * node], Ns);
                 }
                 // don't forget last node and parameter RHS
-                // memcpy(&v[N - node - nparam], &x[M - node - nparam], (node + nparam) * sizeof(data_t));
                 lacpy("A", node + nparam, nrhs, &x[N - node - nparam], N, &v[Ns - node - nparam], Ns);
                 // copy current RHS into backup vector y
                 memcpy(y, x, nrhs * N * sizeof(data_t));
@@ -2118,38 +2204,33 @@ namespace DEV
                 // solve subsystem Sw = v
                 m_S->solve(v, w, nrhs);
 
-                // NOTE: sometimes when nparam > 1, solver will need 1 iteration of BiCGStab
-                // This is likely a bug in the code somewhere, but I wasn't able to track it
-                // down and this is chdeap and it seems (for my tests) to have a universal
-                // iteration bound of one
-                auto A_Op = [this](const data_t *in, data_t *out, size_t, size_t nrhs) {
-                    // sgemv(0.0, out, 1.0, in);
-                    sgemm(nrhs, 0.0, out, 1.0, in);
-                    return 0;
-                };
-                auto M_Op = [this](const data_t *in, data_t *out, size_t, size_t nrhs) {
-                    m_S->solve(in, out, nrhs);
-                    return 0;
-                };
-                // block_bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, N, nrhs, w, v, &m_work[3 * M], lwork, 10, N * std::pow(0.5, 52), std::pow(0.5, 104), std::pow(0.5, 104), &niters, true);
-                for (i = 0; i < nrhs; i += 32) {
-                    Krylov::block_bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, Ns, std::min<int>(32, nrhs - i), &w[i * Ns], &v[i * Ns], &m_work[3 * N * nrhs], lwork, 10, Ns * pow(0.5, 52), pow(0.5, 104), &niters, false);
+                if (nparam > 0) {
+                    int lwork = (int)(getLWork(nrhs) - 3 * N * nrhs);
+                    auto A_Op = [this](const data_t *in, data_t *out, size_t, size_t nrhs) {
+                        sgemm(nrhs, 0.0, out, 1.0, in);
+                        return 0;
+                    };
+                    auto M_Op = [this](const data_t *in, data_t *out, size_t, size_t nrhs) {
+                        m_S->solve(in, out, nrhs);
+                        return 0;
+                    };
+                    for (i = 0; i < nrhs; i += 32) {
+                        Krylov::block_bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, Ns, std::min<int>(32, nrhs - i), &w[i * Ns], &v[i * Ns], &m_work[3 * N * nrhs], lwork, 10, Ns * pow(0.5, 52), pow(0.5, 104), &niters, false);
+                    }
                 }
-                // block_bicgstab<decltype(A_Op), decltype(M_Op), data_t>(A_Op, M_Op, Ns, nrhs, w, v, &m_work[3 * N * nrhs], lwork, 10, Ns * pow(0.5, 52), pow(0.5, 104), &niters, true);
 
                 // copy results into x
                 for (i = 0; i < (m_nblocks + 1); i++) {
-                    // memcpy(&x[i * bsize], &w[i * node], node * sizeof(data_t));
                     lacpy("A", node, nrhs, &w[i * node], Ns, &x[i * bsize], N);
                 }
-                // memcpy(&x[M - nparam], &w[N - nparam], nparam * sizeof(data_t));
-                lacpy("A", nparam, nrhs, &w[Ns - nparam], Ns, &x[N - nparam], N);
+                if (nparam > 0) {
+                    lacpy("A", nparam, nrhs, &w[Ns - nparam], Ns, &x[N - nparam], N);
+                }
 
                 // back substitution on final blocks and inverse column swaps
 #pragma omp parallel for private(i) if (m_nblocks >= 64)
                 for (i = 0; i < m_nblocks; i++) {
                     const Partition<data_t> &partition = m_partitions[i];
-                    // partition.backsubstitute(x, y, M, i);
                     partition.backsubstitute(nrhs, x, y, N, i);
                 }
             }
@@ -2171,16 +2252,20 @@ namespace DEV
                 for (i = 0; i < m_nblocks; i++) {
                     partition = &m_partitions_mm[i];
                     DEV::linalg::gemv<data_t>("N", nrowA, ncolA, alpha, partition->A, nrowA, &x[i * nrowA], 1, beta, &y[i * nrowA], 1);
-                    DEV::linalg::gemv<data_t>("N", nrowA, ncolC, alpha, partition->C, nrowA, &x[N - ncolC], 1, 1.0, &y[i * nrowA], 1);
+                    if (ncolC > 0) {
+                        DEV::linalg::gemv<data_t>("N", nrowA, ncolC, alpha, partition->C, nrowA, &x[N - ncolC], 1, 1.0, &y[i * nrowA], 1);
+                    }
                 }
 
                 // boundary conditions
                 DEV::linalg::gemv<data_t>("N", node, node, alpha, m_bc->BC0, node, x, 1, beta, &y[N - node - ncolC], 1);
                 DEV::linalg::gemv<data_t>("N", node, node, alpha, m_bc->BC1, node, &x[N - node - ncolC], 1, 1.0, &y[N - node - ncolC], 1);
-                DEV::linalg::gemv<data_t>("N", node, ncolC, alpha, m_bc->BCp, node, &x[N - ncolC], 1, 1.0, &y[N - node - ncolC], 1);
+                if (ncolC > 0) {
+                    DEV::linalg::gemv<data_t>("N", node, ncolC, alpha, m_bc->BCp, node, &x[N - ncolC], 1, 1.0, &y[N - node - ncolC], 1);
 
-                // last rows
-                DEV::linalg::gemv<data_t>("N", ncolC, N, alpha, m_V_mm, ncolC, x, 1, beta, &y[N - ncolC], 1);
+                    // last rows
+                    DEV::linalg::gemv<data_t>("N", ncolC, N, alpha, m_V_mm, ncolC, x, 1, beta, &y[N - ncolC], 1);
+                }
             }
 
             void gemm(const ptrdiff_t nrhs, const data_t beta, data_t *y, const data_t alpha, const data_t *x) const
@@ -2201,16 +2286,20 @@ namespace DEV
                 for (i = 0; i < m_nblocks; i++) {
                     partition = &m_partitions_mm[i];
                     DEV::linalg::gemm<data_t>("N", "N", nrowA, nrhs, ncolA, alpha, partition->A, nrowA, &x[i * nrowA], N, beta, &y[i * nrowA], N);
-                    DEV::linalg::gemm<data_t>("N", "N", nrowA, nrhs, ncolC, alpha, partition->C, nrowA, &x[N - ncolC], N, 1.0, &y[i * nrowA], N);
+                    if (ncolC > 0) {
+                        DEV::linalg::gemm<data_t>("N", "N", nrowA, nrhs, ncolC, alpha, partition->C, nrowA, &x[N - ncolC], N, 1.0, &y[i * nrowA], N);
+                    }
                 }
 
                 // boundary conditions
                 DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, m_bc->BC0, node, x, N, beta, &y[bc_idx], N);
                 DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, m_bc->BC1, node, &x[bc_idx], N, 1.0, &y[bc_idx], N);
-                DEV::linalg::gemm<data_t>("N", "N", node, nrhs, ncolC, alpha, m_bc->BCp, node, &x[N - ncolC], N, 1.0, &y[bc_idx], N);
+                if (ncolC > 0) {
+                    DEV::linalg::gemm<data_t>("N", "N", node, nrhs, ncolC, alpha, m_bc->BCp, node, &x[N - ncolC], N, 1.0, &y[bc_idx], N);
 
-                // last rows
-                DEV::linalg::gemm<data_t>("N", "N", ncolC, nrhs, N, alpha, m_V_mm, ncolC, x, N, beta, &y[N - ncolC], N);
+                    // last rows
+                    DEV::linalg::gemm<data_t>("N", "N", ncolC, nrhs, N, alpha, m_V_mm, ncolC, x, N, beta, &y[N - ncolC], N);
+                }
             }
 
             void sgemv(const data_t beta, data_t *y, const data_t alpha, const data_t *x) const
@@ -2235,22 +2324,26 @@ namespace DEV
 
                     DEV::linalg::gemv<data_t>("N", node, node, alpha, partition->ALs(), ldX, x0, 1, beta, &y[i * node], 1);
                     DEV::linalg::gemv<data_t>("N", node, node, alpha, partition->ARs(), ldX, x1, 1, 1.0, &y[i * node], 1);
-                    DEV::linalg::gemv<data_t>("N", node, nparam, alpha, partition->Cs(), ldX, xp, 1, 1.0, &y[i * node], 1);
+                    if (nparam > 0) {
+                        DEV::linalg::gemv<data_t>("N", node, nparam, alpha, partition->Cs(), ldX, xp, 1, 1.0, &y[i * node], 1);
+                    }
                 }
 
                 // boundary conditions
                 DEV::linalg::gemv<data_t>("N", node, node, alpha, m_bc->BC0, node, x, 1, beta, &y[N - node - nparam], 1);
                 DEV::linalg::gemv<data_t>("N", node, node, alpha, m_bc->BC1, node, &x[N - node - nparam], 1, 1.0, &y[N - node - nparam], 1);
-                DEV::linalg::gemv<data_t>("N", node, nparam, alpha, m_bc->BCp, node, &x[N - nparam], 1, 1.0, &y[N - node - nparam], 1);
+                if (nparam > 0) {
+                    DEV::linalg::gemv<data_t>("N", node, nparam, alpha, m_bc->BCp, node, &x[N - nparam], 1, 1.0, &y[N - node - nparam], 1);
 
-                // last rows
-                for (i = 0; i < nparam; i++) {
-                    y[N - nparam + i] *= beta;
+                    // last rows
+                    for (i = 0; i < nparam; i++) {
+                        y[N - nparam + i] *= beta;
+                    }
+                    for (i = 0; i < (m_nblocks + 1); i++) {
+                        DEV::linalg::gemv<data_t>("N", nparam, node, alpha, &m_prows[i * ldX * nparam], nparam, &x[i * node], 1, 1.0, &y[N - nparam], 1);
+                    }
+                    DEV::linalg::gemv<data_t>("N", nparam, nparam, alpha, m_D, nparam, &x[N - nparam], 1, 1.0, &y[N - nparam], 1);
                 }
-                for (i = 0; i < (m_nblocks + 1); i++) {
-                    DEV::linalg::gemv<data_t>("N", nparam, node, alpha, &m_prows[i * ldX * nparam], nparam, &x[i * node], 1, 1.0, &y[N - nparam], 1);
-                }
-                DEV::linalg::gemv<data_t>("N", nparam, nparam, alpha, m_D, nparam, &x[N - nparam], 1, 1.0, &y[N - nparam], 1);
             }
 
             void sgemm(const ptrdiff_t nrhs, const data_t beta, data_t *y, const data_t alpha, const data_t *x) const
@@ -2275,20 +2368,24 @@ namespace DEV
 
                     DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, partition->ALs(), ldX, x0, N, beta, &y[i * node], N);
                     DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, partition->ARs(), ldX, x1, N, 1.0, &y[i * node], N);
-                    DEV::linalg::gemm<data_t>("N", "N", node, nrhs, nparam, alpha, partition->Cs(), ldX, xp, N, 1.0, &y[i * node], N);
+                    if (nparam > 0) {
+                        DEV::linalg::gemm<data_t>("N", "N", node, nrhs, nparam, alpha, partition->Cs(), ldX, xp, N, 1.0, &y[i * node], N);
+                    }
                 }
 
                 // boundary conditions
                 DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, m_bc->BC0, node, x, N, beta, &y[N - node - nparam], N);
                 DEV::linalg::gemm<data_t>("N", "N", node, nrhs, node, alpha, m_bc->BC1, node, &x[N - node - nparam], N, 1.0, &y[N - node - nparam], N);
-                DEV::linalg::gemm<data_t>("N", "N", node, nrhs, nparam, alpha, m_bc->BCp, node, &x[N - nparam], N, 1.0, &y[N - node - nparam], N);
+                if (nparam > 0) {
+                    DEV::linalg::gemm<data_t>("N", "N", node, nrhs, nparam, alpha, m_bc->BCp, node, &x[N - nparam], N, 1.0, &y[N - node - nparam], N);
 
-                // last rows
-                for (i = 0; i < (m_nblocks + 1); i++) {
-                    data_t current_beta = (i == 0) ? beta : 1.0;
-                    DEV::linalg::gemm<data_t>("N", "N", nparam, nrhs, node, alpha, &m_prows[i * ldX * nparam], nparam, &x[i * node], N, current_beta, &y[N - nparam], N);
+                    // last rows
+                    for (i = 0; i < (m_nblocks + 1); i++) {
+                        data_t current_beta = (i == 0) ? beta : 1.0;
+                        DEV::linalg::gemm<data_t>("N", "N", nparam, nrhs, node, alpha, &m_prows[i * ldX * nparam], nparam, &x[i * node], N, current_beta, &y[N - nparam], N);
+                    }
+                    DEV::linalg::gemm<data_t>("N", "N", nparam, nrhs, nparam, alpha, m_D, nparam, &x[N - nparam], N, 1.0, &y[N - nparam], N);
                 }
-                DEV::linalg::gemm<data_t>("N", "N", nparam, nrhs, nparam, alpha, m_D, nparam, &x[N - nparam], N, 1.0, &y[N - nparam], N);
             }
         };
     } // namespace internal

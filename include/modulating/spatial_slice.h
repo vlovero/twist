@@ -34,6 +34,17 @@ namespace TWIST
         double *M = nullptr;       // column-major (transposed) M(c, L) matching Hopf::setup_M_and_D
         double *dM_dc = nullptr;   // column-major dM/dc
         double *A_gl_invT = nullptr; // (A_GL)^{-T}, size nstages * nstages
+        double *D_gl = nullptr;      // cached (nstages+1) x (nstages+1) Lagrange differentiation matrix
+
+        size_t m_nnz = 0;
+        int *m_rows = nullptr;
+        int *m_cols = nullptr;
+        double *m_vals = nullptr;
+
+        size_t dm_nnz = 0;
+        int *dm_rows = nullptr;
+        int *dm_cols = nullptr;
+        double *dm_vals = nullptr;
 
         SpatialSlice() = default;
         SpatialSlice(const SpatialSlice &other);
@@ -46,8 +57,11 @@ namespace TWIST
         void initFromCollocator(const Collocator &col);
         void updateGrid(size_t new_nnodes, const double *new_t);
 
-        // Builds M(c, L) and dM/dc(c, L) in column-major layout (where L = spatial_period = sps * unscaled_spatial_period)
+        // Builds M(c, L) and dM/dc(c, L) in column-major layout and sparse form (where L = sps * unscaled_spatial_period)
         void updateMassMatrices(double c, double sps);
+
+        // Extracts sparse (rows, cols, vals) of M(c, sps * unscaled_spatial_period) into caller buffers (capacity >= node)
+        void buildSparseMass(double c, double sps, size_t &nnz_out, int *rows_out, int *cols_out, double *vals_out) const;
 
         // Evaluates R_space(Y; p) with periodic BC Y_0 - Y_end at the last `node` entries.
         // `yp` must have size >= n_space (can be scratch).
@@ -56,6 +70,9 @@ namespace TWIST
         // Evaluates out = beta * out + alpha * B_M * v using the supplied column-major M_colmajor (node x node).
         // `work` must have size >= node * nstages.
         void applyMassOp(const double *M_colmajor, const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const;
+
+        // Evaluates out = beta * out + alpha * B_M * v using sparse mass representation (zero heap/work needed).
+        void applyMassOpSparse(size_t nnz, const int *rows, const int *cols, const double *vals, const RP(double) v, RP(double) out, double alpha, double beta) const;
 
         void applyMass(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const;
         void applyMassDerivC(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const;

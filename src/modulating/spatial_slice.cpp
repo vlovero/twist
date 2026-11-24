@@ -76,6 +76,31 @@ namespace TWIST
             A_gl_invT = (double *)malloc(nstages * nstages * sizeof(double));
             memcpy(A_gl_invT, other.A_gl_invT, nstages * nstages * sizeof(double));
         }
+        if (nstages > 0 && other.D_gl != nullptr) {
+            const size_t n_basis = nstages + 1;
+            D_gl = (double *)malloc(n_basis * n_basis * sizeof(double));
+            memcpy(D_gl, other.D_gl, n_basis * n_basis * sizeof(double));
+        }
+        if (node > 0) {
+            m_nnz = other.m_nnz;
+            m_rows = (int *)malloc(node * sizeof(int));
+            m_cols = (int *)malloc(node * sizeof(int));
+            m_vals = (double *)malloc(node * sizeof(double));
+            if (m_nnz > 0 && other.m_rows) {
+                memcpy(m_rows, other.m_rows, m_nnz * sizeof(int));
+                memcpy(m_cols, other.m_cols, m_nnz * sizeof(int));
+                memcpy(m_vals, other.m_vals, m_nnz * sizeof(double));
+            }
+            dm_nnz = other.dm_nnz;
+            dm_rows = (int *)malloc(node * sizeof(int));
+            dm_cols = (int *)malloc(node * sizeof(int));
+            dm_vals = (double *)malloc(node * sizeof(double));
+            if (dm_nnz > 0 && other.dm_rows) {
+                memcpy(dm_rows, other.dm_rows, dm_nnz * sizeof(int));
+                memcpy(dm_cols, other.dm_cols, dm_nnz * sizeof(int));
+                memcpy(dm_vals, other.dm_vals, dm_nnz * sizeof(double));
+            }
+        }
         return *this;
     }
 
@@ -114,6 +139,18 @@ namespace TWIST
             free(A_gl_invT);
             A_gl_invT = nullptr;
         }
+        if (D_gl) {
+            free(D_gl);
+            D_gl = nullptr;
+        }
+        if (m_rows) { free(m_rows); m_rows = nullptr; }
+        if (m_cols) { free(m_cols); m_cols = nullptr; }
+        if (m_vals) { free(m_vals); m_vals = nullptr; }
+        if (dm_rows) { free(dm_rows); dm_rows = nullptr; }
+        if (dm_cols) { free(dm_cols); dm_cols = nullptr; }
+        if (dm_vals) { free(dm_vals); dm_vals = nullptr; }
+        m_nnz = 0;
+        dm_nnz = 0;
     }
 
     void SpatialSlice::init(size_t in_nstages, size_t in_node, size_t in_nnodes, const double *in_t, func_t in_func, func_t in_fjac, pjac_t in_pjac, const diffusion_t &diffusion, double in_unscaled_spatial_period)
@@ -148,6 +185,14 @@ namespace TWIST
 
         M = (double *)calloc(node * node, sizeof(double));
         dM_dc = (double *)calloc(node * node, sizeof(double));
+        m_rows = (int *)malloc(node * sizeof(int));
+        m_cols = (int *)malloc(node * sizeof(int));
+        m_vals = (double *)malloc(node * sizeof(double));
+        dm_rows = (int *)malloc(node * sizeof(int));
+        dm_cols = (int *)malloc(node * sizeof(int));
+        dm_vals = (double *)malloc(node * sizeof(double));
+        m_nnz = 0;
+        dm_nnz = 0;
 
         // Precompute (A_GL)^{-T} for exact stage-derivative extraction from collocation state
         A_gl_invT = (double *)malloc(nstages * nstages * sizeof(double));
@@ -168,6 +213,34 @@ namespace TWIST
         memcpy(work_inv, c_A, nstages * nstages * sizeof(double));
         dgesv(s, s, work_inv, s, ipiv, rhs, s, &info);
         memcpy(A_gl_invT, rhs, nstages * nstages * sizeof(double));
+
+        // Precompute (nstages+1) x (nstages+1) Lagrange differentiation matrix D_gl
+        const size_t n_basis = nstages + 1;
+        D_gl = (double *)malloc(n_basis * n_basis * sizeof(double));
+        double nodes_gl[n_basis];
+        nodes_gl[0] = 0.0;
+        for (size_t j = 0; j < nstages; j++) {
+            nodes_gl[j + 1] = c_c[j];
+        }
+        for (size_t l = 0; l < n_basis; l++) {
+            const double th = nodes_gl[l];
+            for (size_t j = 0; j < n_basis; j++) {
+                double den = 1.0;
+                for (size_t q = 0; q < n_basis; q++) {
+                    if (q != j) den *= (nodes_gl[j] - nodes_gl[q]);
+                }
+                double num = 0.0;
+                for (size_t k = 0; k < n_basis; k++) {
+                    if (k == j) continue;
+                    double prod = 1.0;
+                    for (size_t q = 0; q < n_basis; q++) {
+                        if (q != j && q != k) prod *= (th - nodes_gl[q]);
+                    }
+                    num += prod;
+                }
+                D_gl[l * n_basis + j] = num / den;
+            }
+        }
 
         updateGrid(in_nnodes, in_t);
     }
@@ -193,22 +266,19 @@ namespace TWIST
         }
     }
 
-    void SpatialSlice::updateMassMatrices(double c, double sps)
+    void SpatialSlice::buildSparseMass(double c, double sps, size_t &nnz_out, int *rows_out, int *cols_out, double *vals_out) const
     {
         const double L = sps * unscaled_spatial_period;
-        memset(M, 0, node * node * sizeof(double));
-        memset(dM_dc, 0, node * node * sizeof(double));
-
         double D_full[node];
         memset(D_full, 0, node * sizeof(double));
         for (size_t idx = 0; idx < ndiff; idx++) {
-            // Note: to_delete[idx] = diff_loc + idx + 1, so diff_loc = to_delete[idx] - idx - 1
             const int diff_loc = to_delete[idx] - (int)idx - 1;
             if (diff_loc >= 0 && (size_t)diff_loc < node) {
                 D_full[diff_loc] = diff_coeffs[idx];
             }
         }
 
+        size_t nnz = 0;
         size_t k = 0;
         for (size_t i = 0; i < node; i++) {
             bool next_is_del = false;
@@ -227,15 +297,42 @@ namespace TWIST
             if (cur_is_del) {
                 const size_t j = (size_t)to_delete[k];
                 k++;
-                // Row j, col j-1 in row-major -> transposed below to col-major
-                M[j * node + (j - 1)] = -L / D_full[j - k];
+                rows_out[nnz] = (int)j;
+                cols_out[nnz] = (int)(j - 1);
+                vals_out[nnz] = -L / D_full[j - k];
+                nnz++;
                 continue;
             }
-            M[i * node + i] = L / c;
-            dM_dc[i * node + i] = -L / (c * c);
+            rows_out[nnz] = (int)i;
+            cols_out[nnz] = (int)i;
+            vals_out[nnz] = L / c;
+            nnz++;
         }
-        dlatrn((ptrdiff_t)node, M, (ptrdiff_t)node);
-        dlatrn((ptrdiff_t)node, dM_dc, (ptrdiff_t)node);
+        nnz_out = nnz;
+    }
+
+    void SpatialSlice::updateMassMatrices(double c, double sps)
+    {
+        const double L = sps * unscaled_spatial_period;
+        memset(M, 0, node * node * sizeof(double));
+        memset(dM_dc, 0, node * node * sizeof(double));
+
+        buildSparseMass(c, sps, m_nnz, m_rows, m_cols, m_vals);
+
+        dm_nnz = 0;
+        const double inv_c2 = -L / (c * c);
+        for (size_t nz = 0; nz < m_nnz; nz++) {
+            const int r = m_rows[nz];
+            const int col = m_cols[nz];
+            M[(size_t)col * node + (size_t)r] = m_vals[nz];
+            if (r == col) {
+                dM_dc[(size_t)col * node + (size_t)r] = inv_c2;
+                dm_rows[dm_nnz] = r;
+                dm_cols[dm_nnz] = col;
+                dm_vals[dm_nnz] = inv_c2;
+                dm_nnz++;
+            }
+        }
     }
 
     void SpatialSlice::evaluateResidual(const RP(double) Y, const RP(double) p, RP(double) residual, RP(double) yp) const
@@ -339,19 +436,66 @@ namespace TWIST
         }
     }
 
-    void SpatialSlice::applyMass(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const
+    void SpatialSlice::applyMassOpSparse(size_t nnz, const int *rows, const int *cols, const double *vals, const RP(double) v, RP(double) out, double alpha, double beta) const
     {
-        applyMassOp(M, v, out, alpha, beta, work);
+        const size_t n = nnodes - 1;
+        const size_t m = node;
+        const size_t s = nstages;
+
+        if (beta == 0.0) {
+            memset(out, 0, n_space * sizeof(double));
+        }
+        else if (beta != 1.0) {
+            for (size_t i = 0; i < n_space; i++) {
+                out[i] *= beta;
+            }
+        }
+
+        double tmp[s];
+        for (size_t k = 0; k < n; k++) {
+            const size_t stride_k = m * (s + 1) * k;
+            const double scale_k = alpha * h[k];
+
+            for (size_t nz = 0; nz < nnz; nz++) {
+                const size_t r = (size_t)rows[nz];
+                const size_t c = (size_t)cols[nz];
+                const double s_mv = scale_k * vals[nz];
+
+                for (size_t i = 0; i < s; i++) {
+                    tmp[i] = v[stride_k + (i + 1) * m + c];
+                }
+
+                double sum_b = 0.0;
+                for (size_t i = 0; i < s; i++) {
+                    sum_b += c_b[i] * tmp[i];
+                }
+                out[stride_k + r] += s_mv * sum_b;
+
+                for (size_t j = 0; j < s; j++) {
+                    const double *Aj = &c_A[j * s];
+                    double sum_a = 0.0;
+                    for (size_t i = 0; i < s; i++) {
+                        sum_a += Aj[i] * tmp[i];
+                    }
+                    out[stride_k + (j + 1) * m + r] += s_mv * sum_a;
+                }
+            }
+        }
     }
 
-    void SpatialSlice::applyMassDerivC(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const
+    void SpatialSlice::applyMass(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) /*work*/) const
     {
-        applyMassOp(dM_dc, v, out, alpha, beta, work);
+        applyMassOpSparse(m_nnz, m_rows, m_cols, m_vals, v, out, alpha, beta);
     }
 
-    void SpatialSlice::applyMassDerivSps(double sps, const RP(double) v, RP(double) out, double alpha, double beta, RP(double) work) const
+    void SpatialSlice::applyMassDerivC(const RP(double) v, RP(double) out, double alpha, double beta, RP(double) /*work*/) const
     {
-        applyMassOp(M, v, out, alpha / sps, beta, work);
+        applyMassOpSparse(dm_nnz, dm_rows, dm_cols, dm_vals, v, out, alpha, beta);
+    }
+
+    void SpatialSlice::applyMassDerivSps(double sps, const RP(double) v, RP(double) out, double alpha, double beta, RP(double) /*work*/) const
+    {
+        applyMassOpSparse(m_nnz, m_rows, m_cols, m_vals, v, out, alpha / sps, beta);
     }
 
     void SpatialSlice::fillQuadratureWeights(RP(double) weights, bool include_nodes) const

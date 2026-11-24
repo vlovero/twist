@@ -220,8 +220,8 @@ static void BM_ColMat_AddMassBlock_Real(benchmark::State &state)
     base.update(bench_fjac<NODE>, bench_pjac<NODE>, NNODES, NODE, NCOL, 0, fx.slice.unscaled_spatial_period, fx.slice.h, fx.y_end.data(), fx.p, pmask, nullptr, &bc);
 
     for (auto _ : state) {
-        mat.copyPartitionsFrom(base, &bc);
-        mat.addMassBlock(fx.slice.M, fx.slice.c_A, fx.slice.c_b, fx.slice.h, -1.25);
+        mat.copyPartitionsFrom(base, &bc, false);
+        mat.addMassBlockSparse(fx.slice.m_nnz, fx.slice.m_rows, fx.slice.m_cols, fx.slice.m_vals, fx.slice.c_A, fx.slice.c_b, fx.slice.h, -1.25, false);
         benchmark::DoNotOptimize(mat);
     }
 }
@@ -242,8 +242,8 @@ static void BM_ColMat_AddMassBlock_Complex(benchmark::State &state)
     const std::complex<double> scale(-1.25, 0.85);
 
     for (auto _ : state) {
-        mat.copyPartitionsFrom(base, &cbc);
-        mat.addMassBlock(fx.slice.M, fx.slice.c_A, fx.slice.c_b, fx.slice.h, scale);
+        mat.copyPartitionsFrom(base, &cbc, false);
+        mat.addMassBlockSparse(fx.slice.m_nnz, fx.slice.m_rows, fx.slice.m_cols, fx.slice.m_vals, fx.slice.c_A, fx.slice.c_b, fx.slice.h, scale, false);
         benchmark::DoNotOptimize(mat);
     }
 }
@@ -265,8 +265,8 @@ static void BM_ColMat_Factor_Complex(benchmark::State &state)
 
     for (auto _ : state) {
         state.PauseTiming();
-        mat.copyPartitionsFrom(base, &cbc);
-        mat.addMassBlock(fx.slice.M, fx.slice.c_A, fx.slice.c_b, fx.slice.h, scale);
+        mat.copyPartitionsFrom(base, &cbc, false);
+        mat.addMassBlockSparse(fx.slice.m_nnz, fx.slice.m_rows, fx.slice.m_cols, fx.slice.m_vals, fx.slice.c_A, fx.slice.c_b, fx.slice.h, scale, false);
         state.ResumeTiming();
         mat.factor();
     }
@@ -285,8 +285,8 @@ static void BM_ColMat_Solve_Complex(benchmark::State &state)
     DEV::Matrix base;
     DEV::ComplexMatrix mat;
     base.update(bench_fjac<NODE>, bench_pjac<NODE>, NNODES, NODE, NCOL, 0, fx.slice.unscaled_spatial_period, fx.slice.h, fx.y_end.data(), fx.p, pmask, nullptr, &rbc);
-    mat.copyPartitionsFrom(base, &cbc);
-    mat.addMassBlock(fx.slice.M, fx.slice.c_A, fx.slice.c_b, fx.slice.h, std::complex<double>(-1.25, 0.85));
+    mat.copyPartitionsFrom(base, &cbc, false);
+    mat.addMassBlockSparse(fx.slice.m_nnz, fx.slice.m_rows, fx.slice.m_cols, fx.slice.m_vals, fx.slice.c_A, fx.slice.c_b, fx.slice.h, std::complex<double>(-1.25, 0.85), false);
     mat.factor();
 
     const size_t ns = fx.slice.n_space;
@@ -314,8 +314,8 @@ static void BM_ColMat_SolveBatch64_Complex(benchmark::State &state)
     DEV::Matrix base;
     DEV::ComplexMatrix mat;
     base.update(bench_fjac<NODE>, bench_pjac<NODE>, NNODES, NODE, NCOL, 0, fx.slice.unscaled_spatial_period, fx.slice.h, fx.y_end.data(), fx.p, pmask, nullptr, &rbc);
-    mat.copyPartitionsFrom(base, &cbc);
-    mat.addMassBlock(fx.slice.M, fx.slice.c_A, fx.slice.c_b, fx.slice.h, std::complex<double>(-1.25, 0.85));
+    mat.copyPartitionsFrom(base, &cbc, false);
+    mat.addMassBlockSparse(fx.slice.m_nnz, fx.slice.m_rows, fx.slice.m_cols, fx.slice.m_vals, fx.slice.c_A, fx.slice.c_b, fx.slice.h, std::complex<double>(-1.25, 0.85), false);
     mat.factor();
 
     constexpr ptrdiff_t K = 64;

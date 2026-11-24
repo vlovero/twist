@@ -561,12 +561,173 @@ namespace
             CHECK(max_cmat_err < 1e-11);
         }
     }
+
+    void verify_tcolmat_nparam0_accuracy()
+    {
+        const size_t node = 9;
+        const size_t ncol = 8;
+        const size_t nnodes = 50;
+        const double L0 = 2.0;
+        const double p[4] = { 0.85, 0.25, 2.0, 0.75 };
+        const diffusion_t diff = { { 0, TEST_D }, { 3, 0.01 } };
+
+        std::vector<double> t(nnodes);
+        for (size_t i = 0; i < nnodes; i++) {
+            t[i] = (double)i / (double)(nnodes - 1);
+        }
+
+        // Test stiff 9-var system
+        auto stiff_fjac = [](const double *z, const double *pp, double *out) {
+            const size_t m = 9;
+            memset(out, 0, m * m * sizeof(double));
+            const double c = pp[0];
+            const double sps = pp[3];
+            out[0 * m + 1] = sps;
+            out[1 * m + 0] = -sps * (0.2 - 3.0 * z[0] * z[0]) / TEST_D;
+            out[1 * m + 1] = sps * c / TEST_D;
+            out[1 * m + 2] = sps * 1.5 / TEST_D;
+            out[2 * m + 0] = sps * 0.5 / c;
+            out[2 * m + 2] = sps * (-2.0 - z[2]) / c;
+            out[3 * m + 4] = sps;
+            out[4 * m + 3] = -sps * 10.0 / 0.01;
+            out[4 * m + 4] = sps * c / 0.01;
+            for (size_t i = 5; i < m; i++) {
+                out[i * m + 0] = sps * 0.1 / c;
+                out[i * m + i] = -sps * (10.0 * (double)i) / c;
+            }
+        };
+        auto stiff_pjac = [](const double *, const double *, const int *, const int, double *) {};
+        auto stiff_func = [](const double *, const double *, double *) {};
+
+        TWIST::SpatialSlice slice;
+        slice.init(ncol, node, nnodes, t.data(), stiff_func, stiff_fjac, stiff_pjac, diff, 2.0 * L0);
+        slice.updateMassMatrices(p[0], p[3]);
+
+        const size_t ns = slice.n_space;
+        std::vector<double> Y(ns, 0.0);
+        for (size_t i = 0; i < ns; i++) {
+            Y[i] = 0.3 * std::sin(0.07 * (double)(i + 1));
+        }
+
+        DEV::BoundaryConditions rbc;
+        DEV::ComplexBoundaryConditions cbc;
+        rbc.makePeriodic(node, 0);
+        cbc.makePeriodic(node, 0);
+        int pmask[2] = { 0, 0 };
+
+        DEV::Matrix base_mat, real_mat;
+        base_mat.update(stiff_fjac, stiff_pjac, nnodes, node, ncol, 0, slice.unscaled_spatial_period, slice.h, Y.data(), p, pmask, nullptr, &rbc);
+
+        real_mat.copyPartitionsFrom(base_mat, &rbc, false);
+        real_mat.addMassBlockSparse(slice.m_nnz, slice.m_rows, slice.m_cols, slice.m_vals, slice.c_A, slice.c_b, slice.h, -3.5, false);
+        real_mat.factor();
+
+        DEV::Matrix real_ref;
+        real_ref.copyPartitionsFrom(base_mat, &rbc, true);
+        real_ref.addMassBlock(slice.M, slice.c_A, slice.c_b, slice.h, -3.5, true);
+
+        std::vector<double> b_r(ns), x_r(ns), r_r(ns);
+        for (size_t i = 0; i < ns; i++) {
+            b_r[i] = 1e3 * std::cos(0.13 * (double)(i + 1));
+        }
+        real_mat.solve(b_r.data(), x_r.data());
+        real_ref.gemv(0.0, r_r.data(), 1.0, x_r.data());
+        double err_r = 0.0, norm_br = 0.0;
+        for (size_t i = 0; i < ns; i++) {
+            const double d = r_r[i] - b_r[i];
+            err_r += d * d;
+            norm_br += b_r[i] * b_r[i];
+        }
+        const double rel_r = std::sqrt(err_r) / std::sqrt(norm_br);
+        CHECK(rel_r < 1e-13);
+
+        // Complex single RHS and nrhs=64
+        DEV::ComplexMatrix cmat, cref;
+        const std::complex<double> cscale(-2.6, 3.05);
+        cmat.copyPartitionsFrom(base_mat, &cbc, false);
+        cmat.addMassBlockSparse(slice.m_nnz, slice.m_rows, slice.m_cols, slice.m_vals, slice.c_A, slice.c_b, slice.h, cscale, false);
+        cmat.factor();
+
+        cref.copyPartitionsFrom(base_mat, &cbc, true);
+        cref.addMassBlock(slice.M, slice.c_A, slice.c_b, slice.h, cscale, true);
+
+        constexpr ptrdiff_t K = 64;
+        std::vector<std::complex<double>> b_c(ns * K), x_c(ns * K), r_c(ns * K);
+        for (ptrdiff_t col = 0; col < K; col++) {
+            for (size_t i = 0; i < ns; i++) {
+                b_c[(size_t)col * ns + i] = std::complex<double>(1e3 * std::sin(0.11 * (double)(i + col + 1)), -5e2 * std::cos(0.07 * (double)(i + col)));
+            }
+        }
+        cmat.solve(b_c.data(), x_c.data());
+        cref.gemv(0.0, r_c.data(), 1.0, x_c.data());
+        double err_c1 = 0.0, norm_bc1 = 0.0;
+        for (size_t i = 0; i < ns; i++) {
+            err_c1 += std::norm(r_c[i] - b_c[i]);
+            norm_bc1 += std::norm(b_c[i]);
+        }
+        const double rel_c1 = std::sqrt(err_c1) / std::sqrt(norm_bc1);
+        CHECK(rel_c1 < 1e-13);
+
+        cmat.solve(b_c.data(), x_c.data(), K);
+        cref.gemm(K, 0.0, r_c.data(), 1.0, x_c.data());
+        double err_cb = 0.0, norm_bcb = 0.0;
+        for (size_t i = 0; i < ns * K; i++) {
+            err_cb += std::norm(r_c[i] - b_c[i]);
+            norm_bcb += std::norm(b_c[i]);
+        }
+        const double rel_cb = std::sqrt(err_cb) / std::sqrt(norm_bcb);
+        fmt::println("[Test 5] nparam=0 stiff (node=9,nnodes=50) rel_res: real={:.3e}, c1={:.3e}, c64={:.3e}", rel_r, rel_c1, rel_cb);
+        CHECK(rel_cb < 1e-13);
+    }
+
+    void verify_sparse_mass_ops()
+    {
+        for (int case_id = 0; case_id < 2; case_id++) {
+            const size_t node = (case_id == 0) ? 3 : 9;
+            const size_t ncol = (case_id == 0) ? 10 : 8;
+            const size_t nnodes = 19;
+            const diffusion_t diff = (case_id == 0) ? diffusion_t{{0, TEST_D}} : diffusion_t{{0, 1e-3}, {3, 2e-3}};
+            std::vector<double> t(nnodes);
+            for (size_t i = 0; i < nnodes; i++) {
+                t[i] = (double)i / (double)(nnodes - 1);
+            }
+            TWIST::SpatialSlice slice;
+            slice.init(ncol, node, nnodes, t.data(), test_func, test_fjac, test_pjac, diff, 4.0);
+            slice.updateMassMatrices(0.75, 0.6);
+
+            const size_t ns = slice.n_space;
+            std::vector<double> v(ns), out_dense(ns), out_sparse(ns), work(node * ncol + 32);
+            for (size_t i = 0; i < ns; i++) {
+                v[i] = std::sin(0.17 * (double)(i + 1));
+                out_dense[i] = 0.3 * std::cos(0.11 * (double)i);
+                out_sparse[i] = out_dense[i];
+            }
+            slice.applyMassOp(slice.M, v.data(), out_dense.data(), 1.7, 0.5, work.data());
+            slice.applyMass(v.data(), out_sparse.data(), 1.7, 0.5, work.data());
+            double max_err = 0.0, max_mag = 1.0;
+            for (size_t i = 0; i < ns; i++) {
+                max_err = std::max(max_err, std::abs(out_dense[i] - out_sparse[i]));
+                max_mag = std::max(max_mag, std::abs(out_dense[i]));
+            }
+            slice.applyMassOp(slice.dM_dc, v.data(), out_dense.data(), -0.9, 0.0, work.data());
+            slice.applyMassDerivC(v.data(), out_sparse.data(), -0.9, 0.0, work.data());
+            for (size_t i = 0; i < ns; i++) {
+                max_err = std::max(max_err, std::abs(out_dense[i] - out_sparse[i]));
+                max_mag = std::max(max_mag, std::abs(out_dense[i]));
+            }
+            const double rel_err = max_err / max_mag;
+            fmt::println("[Test 6.{}] sparse applyMass vs dense rel err = {:.3e} (abs = {:.3e})", case_id, rel_err, max_err);
+            CHECK(rel_err < 1e-14);
+        }
+    }
 } // namespace
 
 int main()
 {
     verify_add_mass_block();
     verify_dg_convergence_and_precond();
+    verify_tcolmat_nparam0_accuracy();
+    verify_sparse_mass_ops();
     fmt::println("ALL test_spacetime_dae CHECKS PASSED!");
     return 0;
 }
