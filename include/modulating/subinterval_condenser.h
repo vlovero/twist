@@ -55,6 +55,10 @@ namespace TWIST
         const SpatialSlice *slice() const { return m_slice; }
         const DEV::Matrix &avgJacobian() const { return m_avg_jac; }
 
+        size_t statRichardsonSweeps() const { return m_stat_richardson_sweeps; }
+        size_t statGmresFallbacks() const { return m_stat_gmres_fallbacks; }
+        void resetStats() const { m_stat_richardson_sweeps = 0; m_stat_gmres_fallbacks = 0; }
+
     private:
         void ensureWorkspace(size_t n_space, size_t st);
         void applyPrecondOnly(const double *rhs_stages, double *dk_stages) const;
@@ -88,5 +92,7 @@ namespace TWIST
         size_t m_pjac_work_cap = 0;
         mutable double *m_gmres_work = nullptr;
         mutable size_t m_gmres_work_cap = 0;
+        mutable size_t m_stat_richardson_sweeps = 0;
+        mutable size_t m_stat_gmres_fallbacks = 0;
     };
 } // namespace TWIST

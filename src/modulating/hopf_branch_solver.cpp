@@ -5,6 +5,7 @@
 #include "libloader.h"
 #include "linalg.h"
 #include "numpy_like.h"
+#include "profiling.h"
 #include "serialize.h"
 #include "tools/helpers.h"
 #include <algorithm>
@@ -85,6 +86,78 @@ namespace TWIST
             return lo;
         }
     } // namespace
+
+    void HopfTimingStats::reset()
+    {
+        t_residual = 0.0;
+        t_condense_factor = 0.0;
+        t_condense_rhs_p = 0.0;
+        t_precond_update = 0.0;
+        t_gmres_total = 0.0;
+        t_gmres_preelim = 0.0;
+        t_gmres_A_op = 0.0;
+        t_gmres_M_op = 0.0;
+        t_gmres_direct_lu = 0.0;
+        t_gmres_reconstruct = 0.0;
+        t_stage_recover = 0.0;
+        t_adapt = 0.0;
+        t_phase = 0.0;
+        t_tangent = 0.0;
+        t_amp = 0.0;
+        t_serialize = 0.0;
+        n_newton_iters = 0;
+        n_gmres_iters = 0;
+        n_local_gmres_fallbacks = 0;
+        n_richardson_sweeps = 0;
+        n_failed_steps = 0;
+    }
+
+    void HopfTimingStats::printSummary(double wall_total) const
+    {
+        const double inv = (wall_total > 0.0) ? (100.0 / wall_total) : 0.0;
+        const double accounted = t_residual + t_condense_factor + t_condense_rhs_p + t_precond_update
+                               + t_gmres_total + t_stage_recover + t_adapt + t_phase
+                               + t_tangent + t_amp + t_serialize;
+        fmt::println("\n=== Hopf Timing Summary (wall = {:.3f} s, accounted = {:.3f} s [{:.1f}%]) ===",
+            wall_total, accounted, accounted * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "residual", t_residual, t_residual * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "condense_factor", t_condense_factor, t_condense_factor * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "condense_rhs_p", t_condense_rhs_p, t_condense_rhs_p * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "precond_update", t_precond_update, t_precond_update * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "gmres_total", t_gmres_total, t_gmres_total * inv);
+        fmt::println("    {:22s}: {:8.3f} s ({:5.1f}%)", "gmres_preelim", t_gmres_preelim, t_gmres_preelim * inv);
+        fmt::println("    {:22s}: {:8.3f} s ({:5.1f}%)", "gmres_A_op", t_gmres_A_op, t_gmres_A_op * inv);
+        fmt::println("    {:22s}: {:8.3f} s ({:5.1f}%)", "gmres_M_op", t_gmres_M_op, t_gmres_M_op * inv);
+        fmt::println("    {:22s}: {:8.3f} s ({:5.1f}%)", "gmres_direct_lu", t_gmres_direct_lu, t_gmres_direct_lu * inv);
+        fmt::println("    {:22s}: {:8.3f} s ({:5.1f}%)", "gmres_reconstruct", t_gmres_reconstruct, t_gmres_reconstruct * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "stage_recover", t_stage_recover, t_stage_recover * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "adapt", t_adapt, t_adapt * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "phase", t_phase, t_phase * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "tangent", t_tangent, t_tangent * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "amplitude", t_amp, t_amp * inv);
+        fmt::println("  {:24s}: {:8.3f} s ({:5.1f}%)", "serialize", t_serialize, t_serialize * inv);
+        fmt::println("  Counters: newton_iters={}, gmres_iters={}, richardson_sweeps={}, local_gmres={}, failed_steps={}",
+            n_newton_iters, n_gmres_iters, n_richardson_sweeps, n_local_gmres_fallbacks, n_failed_steps);
+    }
+
+    void HopfBranchSolver::resetTimingStats()
+    {
+        m_timing.reset();
+        for (size_t n = 0; n < m_nt; n++) {
+            m_condensers[n].resetStats();
+        }
+    }
+
+    void HopfBranchSolver::collectCondenserStats()
+    {
+        size_t rich = 0, lgm = 0;
+        for (size_t n = 0; n < m_nt; n++) {
+            rich += m_condensers[n].statRichardsonSweeps();
+            lgm += m_condensers[n].statGmresFallbacks();
+        }
+        m_timing.n_richardson_sweeps = rich;
+        m_timing.n_local_gmres_fallbacks = lgm;
+    }
 
     HopfBranchSolver::HopfBranchSolver(const HopfBranchSolver &other)
     {
@@ -517,6 +590,8 @@ namespace TWIST
 
     void HopfBranchSolver::evaluateFullResidual(const double *y_stages, double c, double T, double alpha, double ds, double *G_out, double *Rp_out, bool store_r_space)
     {
+        TWIST_MARK_BEGIN("hopf_residual");
+        const double t0 = omp_get_wtime();
         omp_set_max_active_levels(1);
         OpenBLASThreadContext __openblas_context(1);
         const RadauDGMethod &rm = getRadauDG(m_st);
@@ -599,6 +674,8 @@ namespace TWIST
         Rp_out[0] = psi_sp;
         Rp_out[1] = psi_tm;
         Rp_out[2] = arclen;
+        m_timing.t_residual += omp_get_wtime() - t0;
+        TWIST_MARK_END("hopf_residual");
     }
 
     double HopfBranchSolver::computeResidualNorm(const double *G, const double *Rp) const
@@ -620,16 +697,21 @@ namespace TWIST
 
     void HopfBranchSolver::assembleCondensedSystem(const double *G, bool update_precond)
     {
+        TWIST_MARK_BEGIN("hopf_assemble");
         const RadauDGMethod &rm = getRadauDG(m_st);
         const int alpha_idx = m_pmask[1];
         const bool alpha_is_sps = (alpha_idx == (int)(m_np - 1));
         const double sps = m_p[m_np - 1];
 
+        const double t_loop_start = omp_get_wtime();
         updateMassMatricesAll();
 
         OpenBLASThreadContext __openblas_context(1);
 
-#pragma omp parallel for schedule(dynamic, 1)
+        double sum_factor = 0.0;
+        double sum_rhs_p = 0.0;
+
+#pragma omp parallel for schedule(dynamic, 1) reduction(+:sum_factor, sum_rhs_p)
         for (size_t n = 0; n < m_nt; n++) {
             const SpatialSlice *sl = &m_slices[n];
             const size_t ns = sl->n_space;
@@ -639,7 +721,10 @@ namespace TWIST
             const double *y_prev_end = &m_y_stages[m_stage_offsets[prev] + (m_st - 1) * prev_ns];
             const double dtau_T = m_dtau[n] * m_T;
 
+            const double tf0 = omp_get_wtime();
             m_condensers[n].factor(sl, m_st, yn, m_p, dtau_T, true);
+            const double tf1 = omp_get_wtime();
+            sum_factor += (tf1 - tf0);
 
             const size_t tid = (size_t)omp_get_thread_num();
             double *tbuf = m_stage_scratch + tid * m_stage_scratch_stride;
@@ -727,9 +812,18 @@ namespace TWIST
             }
             m_condensers[n].solveLocalStages(rhs_tmp, dk_tmp, true);
             memcpy(&m_J_Yp[2 * m_total_end + m_end_offsets[n]], &dk_tmp[(m_st - 1) * ns], ns * sizeof(double));
+            sum_rhs_p += omp_get_wtime() - tf1;
+        }
+        const double t_loop = omp_get_wtime() - t_loop_start;
+        const double sum_tot = sum_factor + sum_rhs_p;
+        if (sum_tot > 0.0) {
+            m_timing.t_condense_factor += t_loop * (sum_factor / sum_tot);
+            m_timing.t_condense_rhs_p += t_loop * (sum_rhs_p / sum_tot);
         }
 
         if (update_precond) {
+            TWIST_MARK_BEGIN("hopf_precond_update");
+            const double tp0 = omp_get_wtime();
             const size_t M = (m_nt <= 4) ? m_nt : std::clamp<size_t>(m_win_M, 1, m_nt);
             double *y_end = m_bord_sol; // temporary use before GMRES
             syncEndpointsFromStages(y_end);
@@ -760,11 +854,16 @@ namespace TWIST
                 }
                 m_precond.update(M, win_slices.data(), nullptr, win_y_end.data(), win_dtau.data(), m_T, m_p, 1.0);
             }
+            m_timing.t_precond_update += omp_get_wtime() - tp0;
+            TWIST_MARK_END("hopf_precond_update");
         }
+        TWIST_MARK_END("hopf_assemble");
     }
 
     int HopfBranchSolver::solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose)
     {
+        TWIST_MARK_BEGIN("hopf_gmres");
+        const double t_gmres_start = omp_get_wtime();
         omp_set_max_active_levels(1);
         OpenBLASThreadContext __openblas_context(1);
 
@@ -829,6 +928,7 @@ namespace TWIST
             w_weights[W_end + 2] = w2;
 
             // Pre-eliminate window RHS (g) and parameter columns (J_win)
+            const double t_pe0 = omp_get_wtime();
 #pragma omp parallel for schedule(static) if (M > 1)
             for (size_t w = 0; w < M; w++) {
                 std::vector<double> cur(max_ns), nxt(max_ns);
@@ -878,6 +978,7 @@ namespace TWIST
                     }
                 }
             }
+            m_timing.t_gmres_preelim += omp_get_wtime() - t_pe0;
 
             memcpy(m_bord_rhs, g_end.data(), W_end * sizeof(double));
             m_bord_rhs[W_end + 0] = rhs_p_win[0];
@@ -998,6 +1099,7 @@ namespace TWIST
 
             const bool use_pc = (M >= 2);
             if (use_pc && m_precond.nt() != M) {
+                const double t_pu0 = omp_get_wtime();
                 std::vector<SpatialSlice> win_slices(M);
                 std::vector<double> win_y_end(W_end);
                 for (size_t w = 0; w < M; w++) {
@@ -1007,6 +1109,7 @@ namespace TWIST
                     memcpy(&win_y_end[w_offs[w]], &m_y_stages[m_stage_offsets[e] + (m_st - 1) * ns_e], ns_e * sizeof(double));
                 }
                 m_precond.update(M, win_slices.data(), nullptr, win_y_end.data(), win_dtau.data(), m_T, m_p, 1.0);
+                m_timing.t_precond_update += omp_get_wtime() - t_pu0;
             }
 
             auto win_dot = [&](const double *a, const double *b) -> double {
@@ -1041,6 +1144,7 @@ namespace TWIST
             std::vector<double> win_cur_buf(M * max_ns), win_nxt_buf(M * max_ns);
 
             auto A_win_op = [&](const RP(double) u_in, RP(double) out, size_t) -> int {
+                const double t_a0 = omp_get_wtime();
                 const double *uY = u_in;
                 const double *xp = u_in + W_end;
                 double *outY = out;
@@ -1092,10 +1196,12 @@ namespace TWIST
                     outp[1] += loc_v[3 * w + 1];
                     outp[2] += loc_v[3 * w + 2];
                 }
+                m_timing.t_gmres_A_op += omp_get_wtime() - t_a0;
                 return 0;
             };
 
             auto M_win_op = [&](const RP(double) r, RP(double) z, size_t) -> int {
+                const double t_m0 = omp_get_wtime();
                 const double *rY = r;
                 const double *rp = r + W_end;
                 double *zY = z;
@@ -1132,6 +1238,7 @@ namespace TWIST
                     zp[1] = rp[1];
                     zp[2] = rp[2];
                 }
+                m_timing.t_gmres_M_op += omp_get_wtime() - t_m0;
                 return 0;
             };
 
@@ -1141,8 +1248,14 @@ namespace TWIST
             int niters = 0;
             const int try_max = (M == 1 && W_end <= 1024) ? std::min(maxiter, 60) : maxiter;
             const int status = Krylov::gmres(A_win_op, M_win_op, W_tot, m_bord_sol, m_bord_rhs, w_weights.data(), m_gmres_work, 100, try_max, rtol_win, 1e-13, &niters, verbose);
+            m_timing.n_gmres_iters += (size_t)niters;
             if (status != 0 && M == 1 && W_end <= 1024) {
-                if (solve_direct_single_window()) {
+                const double t_d0 = omp_get_wtime();
+                const bool d_ok = solve_direct_single_window();
+                m_timing.t_gmres_direct_lu += omp_get_wtime() - t_d0;
+                if (d_ok) {
+                    m_timing.t_gmres_total += omp_get_wtime() - t_gmres_start;
+                    TWIST_MARK_END("hopf_gmres");
                     return niters;
                 }
             }
@@ -1152,6 +1265,7 @@ namespace TWIST
             sol_p[2] = m_bord_sol[W_end + 2];
 
             // Reconstruct all slice updates sol_Y inside each window
+            const double t_rec0 = omp_get_wtime();
 #pragma omp parallel for schedule(static) if (M > 1)
             for (size_t w = 0; w < M; w++) {
                 std::vector<double> cur(max_ns);
@@ -1175,15 +1289,20 @@ namespace TWIST
                     }
                 }
             }
+            m_timing.t_gmres_reconstruct += omp_get_wtime() - t_rec0;
+            m_timing.t_gmres_total += omp_get_wtime() - t_gmres_start;
+            TWIST_MARK_END("hopf_gmres");
             (void)status;
             return niters;
         }
 
         // Direct uncondensed path when M == m_nt (e.g. very small nt <= 4)
         if (m_precond.nt() != m_nt) {
+            const double t_pu0 = omp_get_wtime();
             double *y_end = m_bord_rhs; // temporary before copying rhs_Y
             syncEndpointsFromStages(y_end);
             m_precond.update(m_nt, m_slices, m_condensers, y_end, m_dtau, m_T, m_p, 1.0);
+            m_timing.t_precond_update += omp_get_wtime() - t_pu0;
         }
         double S3[9]; // column-major 3x3
         double D3[9] = {
@@ -1211,6 +1330,7 @@ namespace TWIST
         const bool s3_ok = (info3 == 0);
 
         auto A_op = [&](const RP(double) x, RP(double) y, size_t) -> int {
+            const double t_a0 = omp_get_wtime();
             const double *xY = x;
             const double *xp = x + N_end;
             double *yY = y;
@@ -1241,10 +1361,12 @@ namespace TWIST
             yp[0] = endpointDot(m_g_space, xY);
             yp[1] = endpointDot(m_g_time, xY);
             yp[2] = endpointDot(row3_Y, xY) + w0 * row3_p[0] * xp[0] + w1 * row3_p[1] * xp[1] + w2 * row3_p[2] * xp[2];
+            m_timing.t_gmres_A_op += omp_get_wtime() - t_a0;
             return 0;
         };
 
         auto M_op = [&](const RP(double) r, RP(double) z, size_t) -> int {
+            const double t_m0 = omp_get_wtime();
             const double *rY = r;
             const double *rp = r + N_end;
             double *zY = z;
@@ -1276,6 +1398,7 @@ namespace TWIST
                 zp[1] = rp[1];
                 zp[2] = rp[2];
             }
+            m_timing.t_gmres_M_op += omp_get_wtime() - t_m0;
             return 0;
         };
 
@@ -1287,12 +1410,15 @@ namespace TWIST
 
         int niters = 0;
         const int status = Krylov::gmres(A_op, M_op, N_tot, m_bord_sol, m_bord_rhs, m_weights_bord, m_gmres_work, 100, maxiter, rtol, 1e-13, &niters, verbose);
+        m_timing.n_gmres_iters += (size_t)niters;
 
         memcpy(sol_Y, m_bord_sol, N_end * sizeof(double));
         sol_p[0] = m_bord_sol[N_end + 0];
         sol_p[1] = m_bord_sol[N_end + 1];
         sol_p[2] = m_bord_sol[N_end + 2];
 
+        m_timing.t_gmres_total += omp_get_wtime() - t_gmres_start;
+        TWIST_MARK_END("hopf_gmres");
         (void)status;
         return niters;
     }
@@ -1327,6 +1453,7 @@ namespace TWIST
         double sol_p[3];
 
         for (int iter = 0; iter < max_iter; iter++) {
+            m_timing.n_newton_iters++;
             // Re-assemble & update preconditioner on iter 0 or when convergence slowed / damping occurred
             const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 3 == 0));
             assembleCondensedSystem(m_G, update_precond);
@@ -1342,6 +1469,8 @@ namespace TWIST
             const double dalpha = sol_p[2];
             const double sps = m_p[m_np - 1];
 
+            TWIST_MARK_BEGIN("hopf_stage_recover");
+            const double t_sr0 = omp_get_wtime();
 #pragma omp parallel for schedule(dynamic, 1)
             for (size_t n = 0; n < m_nt; n++) {
                 const SpatialSlice *sl = &m_slices[n];
@@ -1427,6 +1556,8 @@ namespace TWIST
 
                 m_condensers[n].solveLocalStages(rhs_tmp, &m_delta_stages[m_stage_offsets[n]], true);
             }
+            m_timing.t_stage_recover += omp_get_wtime() - t_sr0;
+            TWIST_MARK_END("hopf_stage_recover");
 
             const double delta_norm = std::sqrt(endpointDot(sol_Y, sol_Y) + dc * dc + dT * dT + dalpha * dalpha);
             if (!std::isfinite(delta_norm)) {
@@ -1497,6 +1628,10 @@ namespace TWIST
 
     void HopfBranchSolver::computeTangent()
     {
+        TWIST_MARK_BEGIN("hopf_tangent");
+        const double t0 = omp_get_wtime();
+        const double gmres_before = m_timing.t_gmres_total;
+        const double pu_before = m_timing.t_precond_update;
         double *sol_Y = (double *)malloc(m_total_end * sizeof(double));
         double *zero_Y = (double *)calloc(m_total_end, sizeof(double));
         double rhs_p[3] = { 0.0, 0.0, 1.0 };
@@ -1533,10 +1668,16 @@ namespace TWIST
 
         free(zero_Y);
         free(sol_Y);
+        const double inner_gmres = (m_timing.t_gmres_total - gmres_before) + (m_timing.t_precond_update - pu_before);
+        const double dt_tang = (omp_get_wtime() - t0) - inner_gmres;
+        if (dt_tang > 0.0) m_timing.t_tangent += dt_tang;
+        TWIST_MARK_END("hopf_tangent");
     }
 
     void HopfBranchSolver::updatePhaseConditions()
     {
+        TWIST_MARK_BEGIN("hopf_phase");
+        const double t0 = omp_get_wtime();
         syncEndpointsFromStages(m_y_ref_end);
 
         // g_space = y_xi / ||y_xi||
@@ -1586,6 +1727,8 @@ namespace TWIST
             }
         }
         free(gt_cand);
+        m_timing.t_phase += omp_get_wtime() - t0;
+        TWIST_MARK_END("hopf_phase");
     }
 
     void HopfBranchSolver::acceptStep()
@@ -1611,6 +1754,8 @@ namespace TWIST
         if (!bounds.allow_mesh_adaptation) {
             return;
         }
+        TWIST_MARK_BEGIN("hopf_adapt");
+        const double t0 = omp_get_wtime();
         const RadauDGMethod &rm = getRadauDG(m_st);
 
         // 1. Temporal mesh error estimation & adaptation
@@ -1871,6 +2016,8 @@ namespace TWIST
         }
 
         if (!adapt_time && !adapt_space) {
+            m_timing.t_adapt += omp_get_wtime() - t0;
+            TWIST_MARK_END("hopf_adapt");
             return;
         }
 
@@ -1931,6 +2078,8 @@ namespace TWIST
         }
 
         // Polish on adapted mesh with 1-2 Newton steps (fix phase / arclength at current ds)
+        m_timing.t_adapt += omp_get_wtime() - t0;
+        TWIST_MARK_END("hopf_adapt");
         solveNewton(ds, 1e-10, 1e-4, 6, verbose);
     }
 
@@ -1939,6 +2088,8 @@ namespace TWIST
         if (m_nt == 0 || m_node == 0) {
             return 0.0;
         }
+        TWIST_MARK_BEGIN("hopf_amp");
+        const double t0 = omp_get_wtime();
         // Compute L2 deviation from time average on reference mesh slices[0]
         const SpatialSlice &ref = m_slices[0];
         const size_t ns = ref.n_space;
@@ -1967,6 +2118,8 @@ namespace TWIST
             }
             amp2 += m_dtau[n] * slice_l2;
         }
+        m_timing.t_amp += omp_get_wtime() - t0;
+        TWIST_MARK_END("hopf_amp");
         return std::sqrt(std::max(0.0, amp2));
     }
 
@@ -2006,6 +2159,9 @@ namespace TWIST
 
     void HopfBranchSolver::serialize(const std::string &name, const std::string &parameter_set, const std::string &parameter, const std::string &tag, const std::string &prefix, SolutionTypes stype, const std::string &target_h5_path, const std::string &branch_name, int source_index)
     {
+        TWIST_MARK_BEGIN("hopf_serialize");
+        const double t0 = omp_get_wtime();
+        const double amp_before = m_timing.t_amp;
         if (m_serialization_index == -1) {
             m_serialization_index = 0;
             m_model_name = name;
@@ -2122,6 +2278,9 @@ namespace TWIST
         }
         ::serialize<double, 3>(group, "kymograph", kymo.data(), { (hsize_t)(m_nt + 1), (hsize_t)nx_kymo, (hsize_t)m_node });
         m_serialization_file.flush(H5F_SCOPE_GLOBAL);
+        const double dt_ser = (omp_get_wtime() - t0) - (m_timing.t_amp - amp_before);
+        if (dt_ser > 0.0) m_timing.t_serialize += dt_ser;
+        TWIST_MARK_END("hopf_serialize");
     }
 
     void HopfBranchSolver::loadFromH5(const std::string &h5_path, int solution_index)

@@ -4,6 +4,7 @@
 #include "fmt/core.h"
 #include <algorithm>
 #include <cmath>
+#include <omp.h>
 #include <signal.h>
 
 static volatile sig_atomic_t hopf_sigint_received = 0;
@@ -30,6 +31,9 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
 
     LocationBar pbar(parmin, parmax);
 
+    solver.resetTimingStats();
+    const double t_loop_start = omp_get_wtime();
+
     if (!skip_initial_serialize) {
         // Serialize initial point (step 0: Hopf point at A=0)
         solver.serialize(name, parameter_set, parameter, tag, prefix, TWIST::SolutionTypes::torusPoint, target_h5_path, branch_name, source_index);
@@ -53,6 +57,7 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
         const bool converged = solver.solveNewton(step_ds, 1e-10, 1e-4, 25, verbose);
 
         if (!converged) {
+            solver.timingStats().n_failed_steps++;
             solver.restoreAcceptedStep();
             ds *= 0.5;
             if (ds < bounds.dsmin) {
@@ -116,4 +121,8 @@ void hopf_continuation_work_loop(TWIST::HopfBranchSolver &solver, TWIST::HopfCon
     }
     hopf_sigint_received = 0;
     signal(SIGINT, SIG_DFL);
+    if (verbose) {
+        solver.collectCondenserStats();
+        solver.timingStats().printSummary(omp_get_wtime() - t_loop_start);
+    }
 }

@@ -272,6 +272,7 @@ namespace TWIST
         bool richardson_ok = false;
 
         for (int sweep = 0; sweep < 4; sweep++) {
+            m_stat_richardson_sweeps++;
             applyStageOperator(dk_stages, res);
             for (size_t i = 0; i < total; i++) {
                 res[i] = rhs_copy[i] - res[i];
@@ -314,6 +315,7 @@ namespace TWIST
                     return 0;
                 };
                 int local_nit = 0;
+                m_stat_gmres_fallbacks++;
                 Krylov::gmres(A_loc, M_loc, total, dk_stages, rhs_copy, nullptr, m_gmres_work, (int)restart, 32, 1e-12, 1e-13 * rhs_norm, &local_nit, false);
             }
         }
@@ -514,6 +516,7 @@ namespace TWIST
                 }
 
                 for (int sweep = 0; sweep < 4; sweep++) {
+                    m_stat_richardson_sweeps++;
                     applyStageOperatorBatch(ck, dk_chunk.data(), res_chunk.data(), ay_chunk.data(), mass_work);
                     for (size_t p = 0; p < st * block_len; p++) {
                         res_chunk[p] = rhs_chunk[p] - res_chunk[p];
@@ -589,6 +592,7 @@ namespace TWIST
                             return 0;
                         };
                         int local_nit = 0;
+                        m_stat_gmres_fallbacks++;
                         Krylov::gmres(A_loc, M_loc, total, dk_1col.data(), rhs_1col.data(), nullptr, m_gmres_work, (int)restart, 32, 1e-12, 1e-13 * col_rhs_norm[j], &local_nit, false);
                         memcpy(&dk_chunk[(st - 1) * block_len + j * n], &dk_1col[(st - 1) * n], n * sizeof(double));
                     }

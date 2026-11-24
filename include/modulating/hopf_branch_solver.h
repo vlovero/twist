@@ -14,6 +14,35 @@
 
 namespace TWIST
 {
+    struct HopfTimingStats
+    {
+        double t_residual = 0.0;
+        double t_condense_factor = 0.0;
+        double t_condense_rhs_p = 0.0;
+        double t_precond_update = 0.0;
+        double t_gmres_total = 0.0;
+        double t_gmres_preelim = 0.0;
+        double t_gmres_A_op = 0.0;
+        double t_gmres_M_op = 0.0;
+        double t_gmres_direct_lu = 0.0;
+        double t_gmres_reconstruct = 0.0;
+        double t_stage_recover = 0.0;
+        double t_adapt = 0.0;
+        double t_phase = 0.0;
+        double t_tangent = 0.0;
+        double t_amp = 0.0;
+        double t_serialize = 0.0;
+
+        size_t n_newton_iters = 0;
+        size_t n_gmres_iters = 0;
+        size_t n_local_gmres_fallbacks = 0;
+        size_t n_richardson_sweeps = 0;
+        size_t n_failed_steps = 0;
+
+        void reset();
+        void printSummary(double wall_total) const;
+    };
+
     struct HopfContinuationBounds
     {
         double ds = 0.05;
@@ -107,6 +136,11 @@ namespace TWIST
         const double *p() const { return m_p; }
         void *libHandle() const { return m_handle; }
         void setLibHandle(void *h) { m_handle = h; }
+
+        HopfTimingStats &timingStats() { return m_timing; }
+        const HopfTimingStats &timingStats() const { return m_timing; }
+        void resetTimingStats();
+        void collectCondenserStats();
 
     private:
         void allocateForGrid(size_t nt, size_t st, const size_t *slice_nnodes);
@@ -208,5 +242,7 @@ namespace TWIST
         H5::H5File m_serialization_file;
         H5::Group m_serialization_root;
         std::string m_serialization_branch;
+
+        mutable HopfTimingStats m_timing;
     };
 } // namespace TWIST

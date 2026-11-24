@@ -214,6 +214,7 @@ if(BUILD_BENCHMARKS)
             bench_dlatrn
             bench_sparsemat_growth
             bench_scalability
+            bench_hopf
         )
     else()
         set(WHICH_BENCHMARKS $ENV{TWIST_BENCHMARKS})
