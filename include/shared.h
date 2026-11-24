@@ -60,7 +60,8 @@ namespace TWIST
         spectrum,
         bifurcation_points,
         preprocess,
-        simulation
+        simulation,
+        hopf_continuation
     };
 
     enum SolutionTypes : uint64_t
@@ -68,7 +69,10 @@ namespace TWIST
         regular = 0,
         saddleNode,
         branchPoint,
-        torusPoint
+        torusPoint,
+        foldPeriodic,
+        periodDoubling,
+        neimarkSacker
     };
 
     struct ContinuationBounds
