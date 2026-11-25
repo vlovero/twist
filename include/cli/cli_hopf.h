@@ -21,10 +21,10 @@ struct HopfArgs : public argparse::Args
     std::optional<int> &ncol = kwarg("ncol", "spatial GL collocation stages (auto-inferred from HDF5 if omitted)");
     int &ncol_time = kwarg("ncol-time", "temporal Radau IIA dG stages (2=dG1, 3=dG2, 4=dG3)").set_default(3);
     int &nt = kwarg("nt", "initial number of temporal elements").set_default(20);
-    int &min_nodes = kwarg("min-nodes", "minimum spatial nodes during adaptation").set_default(16);
+    int &min_nodes = kwarg("min-nodes", "minimum spatial nodes during adaptation").set_default(20);
     int &max_nodes = kwarg("max-nodes", "maximum spatial nodes during adaptation").set_default(200);
     int &min_nt = kwarg("min-nt", "minimum temporal elements during adaptation").set_default(16);
-    int &max_nt = kwarg("max-nt", "maximum temporal elements during adaptation").set_default(48);
+    int &max_nt = kwarg("max-nt", "maximum temporal elements during adaptation").set_default(200);
     bool &no_adapt = flag("no-adapt", "disable adaptive space-time mesh refinement").set_default(false);
     int &max_steps = kwarg("max-steps", "maximum number of continuation steps").set_default(5000);
 
