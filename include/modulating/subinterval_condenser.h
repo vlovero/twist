@@ -9,6 +9,10 @@
 
 namespace TWIST
 {
+    // Maximum Krylov subspace dimension (restart) for local stage-solve GMRES fallback.
+    // Initialized from TWIST_HOPF_LOCAL_GMRES_DIM (default 16).
+    extern int subinterval_local_gmres_subspace_dim;
+
     class SubintervalCondenser
     {
     public:
@@ -73,6 +77,7 @@ namespace TWIST
         void applyDeltaStageOp(const double *in_stages, double *out_stages) const;
         void applyDeltaStageOpBatch(size_t K, const double *in_stages, double *out_stages, double *w_buf) const;
         void applyStageOperatorBatch(size_t K, const double *dy_stages, double *out_stages, double *ay_buf, double *mass_work) const;
+        void runLocalGmres(double *x, const double *b, double local_rtol, double atol) const;
 
         const SpatialSlice *m_slice = nullptr;
         size_t m_st = 0;

@@ -11,7 +11,9 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -103,6 +105,25 @@ namespace TWIST
         auto stop_time = std::chrono::high_resolution_clock::now();
         double total_time = std::chrono::duration<double>(stop_time - start_time).count();
         fmt::println("{} took {:.3} seconds", what_it_is, total_time);
+    }
+
+    inline int read_positive_int_env(const char *env_name, int fallback)
+    {
+        if (const char *env = std::getenv(env_name)) {
+            char *end = nullptr;
+            const long val = std::strtol(env, &end, 10);
+            if (end != env && val > 0) {
+                while (*end == ' ' || *end == '\t') {
+                    ++end;
+                }
+                if (*end == '\0') {
+                    return (val > std::numeric_limits<int>::max())
+                        ? std::numeric_limits<int>::max()
+                        : static_cast<int>(val);
+                }
+            }
+        }
+        return fallback;
     }
 } // namespace TWIST
 

@@ -5,9 +5,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace TWIST
 {
+    int subinterval_local_gmres_subspace_dim = read_positive_int_env("TWIST_HOPF_LOCAL_GMRES_DIM", 16);
+
     SubintervalCondenser::~SubintervalCondenser()
     {
         freeBuffers();
@@ -541,24 +544,34 @@ namespace TWIST
 
         const double gmres_trigger = std::max(10.0 * local_rtol, 1e-10) * rhs_norm;
         if (!richardson_ok && res_norm > gmres_trigger) {
-            const size_t restart = 16;
-            const size_t lwork = Krylov::gmres_lwork(total, restart);
-            if (m_gmres_work_cap < lwork) {
-                m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
-                m_gmres_work_cap = lwork;
-            }
-            auto A_loc = [&](const RP(double) x, RP(double) y, size_t) -> int {
-                applyStageOperator(x, y);
-                return 0;
-            };
-            auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
-                applyPrecondOnly(r, z);
-                return 0;
-            };
-            int local_nit = 0;
-            m_stat_gmres_fallbacks++;
-            Krylov::gmres(A_loc, M_loc, total, dk_stages, rhs_copy, nullptr, m_gmres_work, (int)restart, 32, local_rtol, 0.1 * local_rtol * rhs_norm, &local_nit, false);
+            runLocalGmres(dk_stages, rhs_copy, local_rtol, 0.1 * local_rtol * rhs_norm);
         }
+    }
+
+    void SubintervalCondenser::runLocalGmres(double *x, const double *b, double local_rtol, double atol) const
+    {
+        const size_t total = m_st * m_n_space;
+        const size_t clamped_dim = std::min<size_t>((size_t)std::max(1, subinterval_local_gmres_subspace_dim), std::max<size_t>(1, total));
+        const int restart = (clamped_dim > (size_t)std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(clamped_dim);
+        const size_t lwork = Krylov::gmres_lwork(total, restart);
+        if (m_gmres_work_cap < lwork) {
+            m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
+            m_gmres_work_cap = lwork;
+        }
+        auto A_loc = [&](const RP(double) vx, RP(double) vy, size_t) -> int {
+            applyStageOperator(vx, vy);
+            return 0;
+        };
+        auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
+            applyPrecondOnly(r, z);
+            return 0;
+        };
+        int local_nit = 0;
+        const int maxiter = std::max(32, restart);
+        m_stat_gmres_fallbacks++;
+        Krylov::gmres(A_loc, M_loc, total, x, b, nullptr, m_gmres_work, restart, maxiter, local_rtol, atol, &local_nit, false);
     }
 
     void SubintervalCondenser::applyElementPropagatorAllStages(const RP(double) w_in, RP(double) dk_stages_out, bool exact_stage_jac, double local_rtol) const
@@ -631,23 +644,7 @@ namespace TWIST
             for (size_t j = 0; j < st; j++) {
                 memcpy(&rhs_stages[j * n], bw, n * sizeof(double));
             }
-            const size_t restart = 16;
-            const size_t lwork = Krylov::gmres_lwork(total, restart);
-            if (m_gmres_work_cap < lwork) {
-                m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
-                m_gmres_work_cap = lwork;
-            }
-            auto A_loc = [&](const RP(double) x, RP(double) y, size_t) -> int {
-                applyStageOperator(x, y);
-                return 0;
-            };
-            auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
-                applyPrecondOnly(r, z);
-                return 0;
-            };
-            int local_nit = 0;
-            m_stat_gmres_fallbacks++;
-            Krylov::gmres(A_loc, M_loc, total, dk_stages_out, rhs_stages, nullptr, m_gmres_work, (int)restart, 32, local_rtol, 0.1 * local_rtol * rhs_norm, &local_nit, false);
+            runLocalGmres(dk_stages_out, rhs_stages, local_rtol, 0.1 * local_rtol * rhs_norm);
         }
     }
 
@@ -922,24 +919,7 @@ namespace TWIST
                 memcpy(&rhs_1col[l * n], &rhs_copy[l * block_len + j * n], n * sizeof(double));
                 memcpy(&dk_1col[l * n], &dk_stages[l * block_len + j * n], n * sizeof(double));
             }
-            const size_t total = st * n;
-            const size_t restart = 16;
-            const size_t lwork = Krylov::gmres_lwork(total, restart);
-            if (m_gmres_work_cap < lwork) {
-                m_gmres_work = (double *)realloc(m_gmres_work, lwork * sizeof(double));
-                m_gmres_work_cap = lwork;
-            }
-            auto A_loc = [&](const RP(double) x, RP(double) y, size_t) -> int {
-                applyStageOperator(x, y);
-                return 0;
-            };
-            auto M_loc = [&](const RP(double) r, RP(double) z, size_t) -> int {
-                applyPrecondOnly(r, z);
-                return 0;
-            };
-            int local_nit = 0;
-            m_stat_gmres_fallbacks++;
-            Krylov::gmres(A_loc, M_loc, total, dk_1col, rhs_1col, nullptr, m_gmres_work, (int)restart, 32, local_rtol, 0.1 * local_rtol * col_rhs_norm[j], &local_nit, false);
+            runLocalGmres(dk_1col, rhs_1col, local_rtol, 0.1 * local_rtol * col_rhs_norm[j]);
             for (size_t l = 0; l < st; l++) {
                 memcpy(&dk_stages[l * block_len + j * n], &dk_1col[l * n], n * sizeof(double));
             }

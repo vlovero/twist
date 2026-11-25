@@ -14,6 +14,10 @@
 
 namespace TWIST
 {
+    // Maximum Krylov subspace dimension (restart) for outer bordered GMRES.
+    // Initialized from TWIST_HOPF_OUTER_GMRES_DIM (default 100).
+    extern int hopf_outer_gmres_subspace_dim;
+
     struct HopfTimingStats
     {
         double t_residual = 0.0;
@@ -165,6 +169,7 @@ namespace TWIST
         // Solves the (m_total_end + 3) bordered system via right-preconditioned weighted GMRES
         // with adaptive M-window exact block condensation.
         size_t defaultWindowCount() const;
+        int ensureGmresWorkspace(size_t sys_dim, int requested_subspace_dim);
         int solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose, double local_rtol = 1e-12, double *out_prop_stages = nullptr, bool *out_prop_filled = nullptr);
 
         // Weighted L2 inner product on endpoint space (length m_total_end)
@@ -236,7 +241,7 @@ namespace TWIST
         double *m_Minv_U = nullptr;        // 3 * m_total_end (P_ST^(-1) * J_Yp)
         double *m_bord_rhs = nullptr;      // m_total_end + 3
         double *m_bord_sol = nullptr;      // m_total_end + 3
-        double *m_gmres_work = nullptr;    // gmres_lwork(m_total_end + 3, 40)
+        double *m_gmres_work = nullptr;    // gmres_lwork(m_total_end + 3, hopf_outer_gmres_subspace_dim)
         size_t m_gmres_work_cap = 0;
 
         double *m_stage_scratch = nullptr; // per-thread/general scratch

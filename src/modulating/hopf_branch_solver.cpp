@@ -14,11 +14,14 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <filesystem>
+#include <limits>
 #include <omp.h>
 #include <stdexcept>
 
 namespace TWIST
 {
+    int hopf_outer_gmres_subspace_dim = read_positive_int_env("TWIST_HOPF_OUTER_GMRES_DIM", 100);
+
     namespace
     {
         void eval_slice_spatial_deriv(const SpatialSlice &slice, const double *Y, double *dY_dxi)
@@ -311,11 +314,7 @@ namespace TWIST
         m_bord_rhs = (double *)realloc(m_bord_rhs, (total_end + 3) * sizeof(double));
         m_bord_sol = (double *)realloc(m_bord_sol, (total_end + 3) * sizeof(double));
 
-        const size_t needed_gmres = Krylov::gmres_lwork(total_end + 3, 100);
-        if (m_gmres_work_cap < needed_gmres) {
-            m_gmres_work = (double *)realloc(m_gmres_work, needed_gmres * sizeof(double));
-            m_gmres_work_cap = needed_gmres;
-        }
+        ensureGmresWorkspace(total_end + 3, hopf_outer_gmres_subspace_dim);
 
         size_t max_ns = 0;
         for (size_t n = 0; n < nt; n++) {
@@ -932,6 +931,20 @@ namespace TWIST
         return 1;
     }
 
+    int HopfBranchSolver::ensureGmresWorkspace(size_t sys_dim, int requested_subspace_dim)
+    {
+        const size_t clamped_dim = std::min<size_t>((size_t)std::max(1, requested_subspace_dim), std::max<size_t>(1, sys_dim));
+        const int eff_restart = (clamped_dim > (size_t)std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(clamped_dim);
+        const size_t needed_gmres = Krylov::gmres_lwork(sys_dim, eff_restart);
+        if (m_gmres_work_cap < needed_gmres) {
+            m_gmres_work = (double *)realloc(m_gmres_work, needed_gmres * sizeof(double));
+            m_gmres_work_cap = needed_gmres;
+        }
+        return eff_restart;
+    }
+
     int HopfBranchSolver::solveBorderedGMRES(const double *rhs_Y, const double *rhs_p, const double *row3_Y, const double *row3_p, double *sol_Y, double *sol_p, double rtol, int maxiter, bool verbose, double local_rtol, double *out_prop_stages, bool *out_prop_filled)
     {
         if (out_prop_filled) {
@@ -1409,7 +1422,8 @@ namespace TWIST
 
             int niters = 0;
             const int try_max = (M == 1 && W_end <= 1024) ? std::min(maxiter, 60) : maxiter;
-            const int status = Krylov::gmres(A_win_op, M_win_op, W_tot, m_bord_sol, m_bord_rhs, w_weights, m_gmres_work, 100, try_max, rtol_win, 1e-13, &niters, verbose, verify_res);
+            const int restart = ensureGmresWorkspace(W_tot, hopf_outer_gmres_subspace_dim);
+            const int status = Krylov::gmres(A_win_op, M_win_op, W_tot, m_bord_sol, m_bord_rhs, w_weights, m_gmres_work, restart, try_max, rtol_win, 1e-13, &niters, verbose, verify_res);
             m_timing.n_gmres_iters += (size_t)niters;
             if (status != 0 && M == 1 && W_end <= 1024) {
                 const double t_d0 = omp_get_wtime();
@@ -1581,7 +1595,8 @@ namespace TWIST
         memset(m_bord_sol, 0, N_tot * sizeof(double));
 
         int niters = 0;
-        const int status = Krylov::gmres(A_op, M_op, N_tot, m_bord_sol, m_bord_rhs, m_weights_bord, m_gmres_work, 100, maxiter, rtol, 1e-13, &niters, verbose, verify_res);
+        const int restart = ensureGmresWorkspace(N_tot, hopf_outer_gmres_subspace_dim);
+        const int status = Krylov::gmres(A_op, M_op, N_tot, m_bord_sol, m_bord_rhs, m_weights_bord, m_gmres_work, restart, maxiter, rtol, 1e-13, &niters, verbose, verify_res);
         m_timing.n_gmres_iters += (size_t)niters;
 
         memcpy(sol_Y, m_bord_sol, N_end * sizeof(double));
@@ -1636,7 +1651,8 @@ namespace TWIST
             }
             else {
                 // Re-assemble & update preconditioner on iter 0 or when convergence slowed / damping occurred
-                const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 3 == 0) || force_full_next || chord_count > 0);
+                // const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 3 == 0) || force_full_next || chord_count > 0);
+                const bool update_precond = (iter == 0 || damp < 1.0 || (iter % 1 == 0) || force_full_next || chord_count > 0);
                 assembleCondensedSystem(m_G, update_precond);
                 chord_count = 0;
                 force_full_next = false;
