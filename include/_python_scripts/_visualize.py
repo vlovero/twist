@@ -29,6 +29,115 @@ def count_solutions(group):
     return sum(1 for key in group.keys() if key.isdigit())
 
 
+_RADAU_C = {
+    2: np.array([1.0 / 3.0, 1.0], dtype=np.float64),
+    3: np.array([0.1550510257216822, 0.64494897427831777, 1.0], dtype=np.float64),
+    4: np.array([0.088587959512703943, 0.40946686444073471, 0.787659461760847, 1.0], dtype=np.float64),
+}
+
+
+def _lagrange_weights(nodes, x):
+    x_arr = np.atleast_1d(np.asarray(x, dtype=np.float64))
+    diff_x = x_arr[:, None] - nodes[None, :]
+    n = len(nodes)
+    w = np.ones((len(x_arr), n), dtype=np.float64)
+    for l in range(n):
+        for q in range(n):
+            if q != l:
+                w[:, l] *= diff_x[:, q] / (nodes[l] - nodes[q])
+    return w
+
+
+def _eval_spatial_element(t_el, h_el, y_el, gl_nodes, xi_eval):
+    """Evaluate 1D GL collocation solution(s) y_el (..., npts) at xi_eval in [0, 1]."""
+    n_basis = len(gl_nodes)
+    nsub = len(t_el) - 1
+    xi_arr = np.atleast_1d(np.asarray(xi_eval, dtype=np.float64))
+    out = np.empty(y_el.shape[:-1] + (len(xi_arr),), dtype=np.float64)
+    end_mask = xi_arr >= 1.0 - 1e-15
+    if end_mask.any():
+        out[..., end_mask] = y_el[..., -1:]
+    interior = ~end_mask
+    if interior.any():
+        xi_int = xi_arr[interior]
+        sub_idx = np.clip(np.searchsorted(t_el[1:-1], xi_int, side="right"), 0, nsub - 1)
+        theta = (xi_int - t_el[sub_idx]) / h_el[sub_idx]
+        W = _lagrange_weights(gl_nodes, theta)
+        idx_pts = sub_idx[:, None] * n_basis + np.arange(n_basis)[None, :]
+        out[..., interior] = np.einsum("...xb,xb->...x", y_el[..., idx_pts], W)
+    return out
+
+
+def _reconstruct_hopf_data(file, sol_index, profile_index, nx_kymo=384, nt_kymo=256):
+    """Reconstruct uniform high-res kymograph and element data from serialized Radau/GL elements."""
+    sol = file[f"{sol_index}"]
+    node = int(file["basic_info/node"][0])
+    nstages = int(file["basic_info/nstages"][0])
+    st = int(file["basic_info/ncol_time"][0]) if "basic_info/ncol_time" in file else 3
+    if ("elements" not in sol) or (st not in _RADAU_C):
+        return None
+
+    nt = int(sol["nt"][0])
+    tau = sol["tau"][...].astype(np.float64, copy=False)
+    els = sol["elements"]
+    gl_c = 0.5 * (leggauss(nstages)[0] + 1.0)
+    gl_nodes = np.concatenate(([0.0], gl_c))
+    n_basis = nstages + 1
+
+    xi_eval = np.linspace(0.0, 1.0, nx_kymo)
+    Y_grid = np.empty((nt, st, nx_kymo), dtype=np.float64)
+    elem_list = []
+
+    for e in range(nt):
+        el = els[str(e)]
+        t_el = el["t"][...].astype(np.float64, copy=False)
+        h_el = el["h"][...].astype(np.float64, copy=False)
+        nsub = len(t_el) - 1
+        npts = nsub * n_basis + 1
+        ys = np.asarray(el["y_stages"][...], dtype=np.float64).reshape(st, npts, node)[:, :, profile_index].copy()
+        Y_grid[e] = _eval_spatial_element(t_el, h_el, ys, gl_nodes, xi_eval)
+        elem_list.append((t_el, h_el, ys))
+
+    tau_disp = np.linspace(0.0, 1.0, nt_kymo)
+    rad_nodes = np.concatenate(([0.0], _RADAU_C[st]))
+    el_idx = np.clip(np.searchsorted(tau[1:-1], tau_disp, side="right"), 0, nt - 1)
+    dtau = tau[el_idx + 1] - tau[el_idx]
+    theta_t = np.where(dtau > 0.0, (tau_disp - tau[el_idx]) / dtau, 0.0)
+    Wt = _lagrange_weights(rad_nodes, theta_t)
+    y_left = Y_grid[(el_idx - 1) % nt, st - 1, :]
+    y_right = Y_grid[el_idx, :, :]
+    kymo = Wt[:, 0:1] * y_left + np.einsum("ts,tsx->tx", Wt[:, 1:], y_right)
+
+    return kymo, (tau, st, gl_nodes, gl_c, elem_list)
+
+
+def _sample_hopf_profile_exact(elem_data, tau_val):
+    """Evaluate exact Radau IIA temporal profile on the element's native adaptive GL spatial mesh."""
+    tau, st, gl_nodes, gl_c, elem_list = elem_data
+    nt = len(elem_list)
+    tau_val = float(np.clip(tau_val, 0.0, 1.0))
+    el_idx = int(np.clip(np.searchsorted(tau[1:-1], tau_val, side="right"), 0, nt - 1))
+    dtau = float(tau[el_idx + 1] - tau[el_idx])
+    theta_t = (tau_val - float(tau[el_idx])) / dtau if dtau > 0.0 else 0.0
+
+    rad_nodes = np.concatenate(([0.0], _RADAU_C[st]))
+    wt = _lagrange_weights(rad_nodes, theta_t)[0]
+
+    t_el, h_el, ys_el = elem_list[el_idx]
+    xi_el = np.append(np.append(t_el[:-1, None], t_el[:-1, None] + h_el[:, None] * gl_c, axis=1).ravel(), t_el[-1])
+
+    t_prev, h_prev, ys_prev = elem_list[(el_idx - 1) % nt]
+    if (len(t_prev) == len(t_el)) and np.array_equal(t_prev, t_el):
+        y_left = ys_prev[st - 1]
+    else:
+        y_left = _eval_spatial_element(t_prev, h_prev, ys_prev[st - 1], gl_nodes, xi_el)
+
+    y_prof = wt[0] * y_left
+    for s in range(st):
+        y_prof = y_prof + wt[s + 1] * ys_el[s]
+    return xi_el, y_prof
+
+
 def _sample_hopf_profile(kymo, tau_grid, tau_val):
     tau_val = float(np.clip(tau_val, 0.0, 1.0))
     if len(tau_grid) <= 1 or kymo.shape[0] <= 1:
@@ -547,6 +656,7 @@ class DispersionCurve:
         self.hopf_tau = 0.5
         self._dragging_kymo_line = False
         self._current_hopf = None
+        self._hopf_cache = {}
         self.unit_circle_line = None
         self.spectrum_mode = None
         self.dispersion_mode, *self.dispersion_mode_colors = dispersion_mode.split(":")
@@ -649,14 +759,22 @@ class DispersionCurve:
     def _update_hopf_profile(self, reset_lims=False):
         if self._current_hopf is None:
             return
-        kymo, tau_grid, x_grid, T_val = self._current_hopf
+        kymo, tau_grid, x_grid, T_val, elem_data, x_lo, x_end, xform = self._current_hopf
         t_curr = self.hopf_tau * T_val
-        y_prof = _sample_hopf_profile(kymo, tau_grid, self.hopf_tau)
-        self.sol_line.set_data(x_grid, y_prof)
+        if elem_data is not None:
+            xi_el, y_prof = _sample_hopf_profile_exact(elem_data, self.hopf_tau)
+            x_prof = x_lo + (x_end - x_lo) * xi_el
+            if xform is not None:
+                shift, scale = xform
+                y_prof = y_prof * scale - shift
+        else:
+            x_prof = x_grid
+            y_prof = _sample_hopf_profile(kymo, tau_grid, self.hopf_tau)
+        self.sol_line.set_data(x_prof, y_prof)
         if self.kymo_hline is not None:
             self.kymo_hline.set_ydata([t_curr, t_curr])
         if reset_lims:
-            self.ax2.set_xlim(float(x_grid[0]), float(x_grid[-1]))
+            self.ax2.set_xlim(float(x_lo), float(x_end))
             ymin = float(np.min(kymo))
             ymax = float(np.max(kymo))
             dy = ymax - ymin
@@ -677,6 +795,7 @@ class DispersionCurve:
         self.spectrum_mode = None
         self._layout_mode = None
         self._current_hopf = None
+        self._hopf_cache.clear()
         self.hopf_tau = 0.5
         self.all_plots.clear()
 
@@ -954,11 +1073,31 @@ class DispersionCurve:
 
         if hopf_mode:
             self._apply_layout(True)
-            kymo = file[f"{sol_index}/kymograph"][:, :, self.profile_index]
+            cache_key = (file_idx, sol_index, self.profile_index)
+            cached = self._hopf_cache.get(cache_key)
+            if cached is None:
+                cached = _reconstruct_hopf_data(file, sol_index, self.profile_index)
+                if cached is not None:
+                    if len(self._hopf_cache) >= 32:
+                        self._hopf_cache.pop(next(iter(self._hopf_cache)))
+                    self._hopf_cache[cache_key] = cached
+            if cached is not None:
+                kymo, elem_data = cached
+                tau_grid = np.linspace(0.0, 1.0, kymo.shape[0])
+            else:
+                elem_data = None
+                kymo = file[f"{sol_index}/kymograph"][:, :, self.profile_index]
+                if f"{sol_index}/tau" in file:
+                    tau_grid = file[f"{sol_index}/tau"][...]
+                else:
+                    tau_grid = np.linspace(0.0, 1.0, kymo.shape[0])
+
+            xform = None
             if self.transforms is not None:
                 for t_idx, shift, scale in self.transforms:
                     if t_idx == self.profile_index:
                         kymo = kymo * scale - shift
+                        xform = (shift, scale)
                         break
             x_hi = 1.0
             if self.actual_spatial_period:
@@ -969,10 +1108,6 @@ class DispersionCurve:
             x_lo = -0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else 0.0
             x_end = 0.5 * x_hi if (self.actual_spatial_period and self.center_wave) else x_hi
             x_grid = np.linspace(x_lo, x_end, kymo.shape[1])
-            if f"{sol_index}/tau" in file:
-                tau_grid = file[f"{sol_index}/tau"][...]
-            else:
-                tau_grid = np.linspace(0.0, 1.0, kymo.shape[0])
 
             kax = self.kymo_ax
             if self.kymo_im is None:
@@ -996,7 +1131,7 @@ class DispersionCurve:
             for line in self.ax2.get_lines():
                 if line is not self.sol_line:
                     line.set_visible(False)
-            self._current_hopf = (kymo, tau_grid, x_grid, T_val)
+            self._current_hopf = (kymo, tau_grid, x_grid, T_val, elem_data, x_lo, x_end, xform)
             self._update_hopf_profile(reset_lims=True)
             ylabel = self.names[self.profile_index]
             if self.wave_profile_units is not None:
