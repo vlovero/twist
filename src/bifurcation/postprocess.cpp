@@ -685,16 +685,10 @@ std::string format_target_label(const std::string &file, const std::string &bran
 {
     return branch_group_path.empty() ? file : fmt::format("{}:/{}", file, branch_group_path);
 }
-} // namespace
 
-void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std::string, std::string>> &targets)
+bool prepare_floquet_targets(const std::vector<std::pair<std::string, std::string>> &targets, std::vector<bool> &compute_target)
 {
-    using namespace indicators;
-    ProgressBar pbar1{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::PrefixText{ "[floquet] " }, option::ShowPercentage(true), option::ShowElapsedTime(true) };
-    ProgressBar pbar2{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::ShowPercentage(true), option::ShowElapsedTime(true), option::ShowRemainingTime(true) };
-    MultiProgress<ProgressBar, 2> pbars(pbar1, pbar2);
-
-    std::vector<bool> compute_target(targets.size(), true);
+    compute_target.assign(targets.size(), true);
     for (size_t i = 0; i < targets.size(); i++) {
         const auto &[file_path, branch_path] = targets[i];
         H5::H5File file(file_path, H5F_ACC_RDWR);
@@ -708,7 +702,7 @@ void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std:
         fflush(stdout);
         char answer = 'n';
         if (scanf(" %c", &answer) != 1) {
-            return;
+            return false;
         }
         if (answer != 'y' && answer != 'Y') {
             compute_target[i] = false;
@@ -722,8 +716,42 @@ void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std:
             }
         }
     }
+    return true;
+}
+
+void serialize_floquet_spectrum(H5::Group &root, int solution_index, const TWIST::FloquetSpectrum &spec)
+{
+    H5::Group sol_group = root.openGroup(fmt::format("{}", solution_index));
+    H5::Group fl_group = sol_group.createGroup("floquet");
+    serialize<double, 1>(fl_group, "mu_real", spec.mu_real.data(), { spec.mu_real.size() });
+    serialize<double, 1>(fl_group, "mu_imag", spec.mu_imag.data(), { spec.mu_imag.size() });
+    serialize<int>(fl_group, "n_unstable", spec.n_unstable);
+    serialize<double>(fl_group, "trivial_err", spec.trivial_err);
+    serialize<int, 1>(fl_group, "trivial_idx", spec.trivial_idx, { (hsize_t)2 });
+}
+
+void evaluate_floquet_targets(const std::vector<std::pair<std::string, std::string>> &targets, bool distributed)
+{
+    using namespace indicators;
+    ProgressBar pbar1{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::PrefixText{ distributed ? "[postprocessing]    " : "[floquet] " }, option::ShowPercentage(true), option::ShowElapsedTime(true) };
+    ProgressBar pbar2{ option::BarWidth{ 50 }, option::Start{ "|" }, option::Fill{ "█" }, option::Lead{ "█" }, option::Remainder{ "-" }, option::End{ "|" }, option::ShowPercentage(true), option::ShowElapsedTime(true), option::ShowRemainingTime(true) };
+    MultiProgress<ProgressBar, 2> pbars(pbar1, pbar2);
+
+    std::optional<OpenBLASThreadContext> openblas_ctx;
+    if (distributed) {
+        openblas_ctx.emplace(1);
+        omp_set_max_active_levels(1);
+    }
+
+    std::vector<bool> compute_target;
+    if (!prepare_floquet_targets(targets, compute_target)) {
+        return;
+    }
 
     pbar1.set_option(option::MaxProgress{ targets.size() });
+    if (distributed) {
+        pbar2.set_option(option::PrefixText{ "[computing floquet] " });
+    }
     for (size_t i = 0; i < targets.size(); i++) {
         const auto &[file_path, branch_path] = targets[i];
         const std::string label = format_target_label(file_path, branch_path);
@@ -736,38 +764,83 @@ void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std:
         H5::H5File file(file_path, H5F_ACC_RDWR);
         H5::Group root = open_hopf_target_group(file, branch_path);
         const int nsol = get_number_of_solutions(root);
-        pbar2.set_option(option::MaxProgress{ (size_t)nsol });
+        pbar2.set_option(option::MaxProgress{ (size_t)std::max(1, nsol) });
 
-        for (int j = 0; j < nsol; j++) {
-            pbar2.set_option(option::PrefixText{ fmt::format("[soln.{:4d}/{:4d}] ", j, nsol) });
+        if (!distributed) {
+            for (int j = 0; j < nsol; j++) {
+                pbar2.set_option(option::PrefixText{ fmt::format("[soln.{:4d}/{:4d}] ", j, nsol) });
 
-            TWIST::HopfBranchSolver solver;
-            solver.loadFromH5(root, j);
-            TWIST::FloquetSpectrum spec = solver.computeFloquet(12, 24, 1e-10, false);
+                TWIST::HopfBranchSolver solver;
+                solver.loadFromH5(root, j);
+                TWIST::FloquetSpectrum spec = solver.computeFloquet(12, 24, 1e-10, false);
 
-            H5::Group sol_group = root.openGroup(fmt::format("{}", j));
-            H5::Group fl_group = sol_group.createGroup("floquet");
-            serialize<double, 1>(fl_group, "mu_real", spec.mu_real.data(), { spec.mu_real.size() });
-            serialize<double, 1>(fl_group, "mu_imag", spec.mu_imag.data(), { spec.mu_imag.size() });
-            serialize<int>(fl_group, "n_unstable", spec.n_unstable);
-            serialize<double>(fl_group, "trivial_err", spec.trivial_err);
-            serialize<int, 1>(fl_group, "trivial_idx", spec.trivial_idx, { (hsize_t)2 });
+                serialize_floquet_spectrum(root, j, spec);
+                pbars.set_progress<1lu>((size_t)j + 1);
+            }
+        }
+        else if (nsol > 0) {
+            int count = 0;
+            const int ndigits = std::max(1, (int)std::ceil(std::log10(std::max(2, nsol))));
+            pbars.set_progress<1lu>(0lu);
+            int j = 0;
 
-            pbars.set_progress<1lu>((size_t)j + 1);
+#pragma omp parallel for private(j) schedule(dynamic, 1)
+            for (j = 0; j < nsol; j++) {
+                std::optional<TWIST::HopfBranchSolver> solver;
+
+#pragma omp critical
+                {
+                    solver.emplace();
+                    solver->loadFromH5(root, j);
+                }
+
+                TWIST::FloquetSpectrum spec = solver->computeFloquet(12, 24, 1e-10, false);
+
+#pragma omp critical
+                {
+                    serialize_floquet_spectrum(root, j, spec);
+                    solver.reset();
+
+                    count += 1;
+                    pbar2.set_option(option::PostfixText{ fmt::format("{0:{2}d}/{1:{2}d}", count, nsol, ndigits) });
+                    pbars.set_progress<1lu>((size_t)count);
+                }
+            }
         }
         pbars.set_progress<0lu>(i + 1);
     }
     puts("");
 }
 
-void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files)
+std::vector<std::pair<std::string, std::string>> files_to_floquet_targets(const std::vector<std::string> &files)
 {
     std::vector<std::pair<std::string, std::string>> targets;
     targets.reserve(files.size());
     for (const auto &file : files) {
         targets.emplace_back(file, "");
     }
-    evaluate_floquet_for_each_solution_inplace(targets);
+    return targets;
+}
+} // namespace
+
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::pair<std::string, std::string>> &targets)
+{
+    evaluate_floquet_targets(targets, false);
+}
+
+void evaluate_floquet_for_each_solution_inplace(const std::vector<std::string> &files)
+{
+    evaluate_floquet_targets(files_to_floquet_targets(files), false);
+}
+
+void evaluate_floquet_for_each_solution_inplace_distributed(const std::vector<std::pair<std::string, std::string>> &targets)
+{
+    evaluate_floquet_targets(targets, true);
+}
+
+void evaluate_floquet_for_each_solution_inplace_distributed(const std::vector<std::string> &files)
+{
+    evaluate_floquet_targets(files_to_floquet_targets(files), true);
 }
 
 void locate_all_floquet_bifurcations_inplace(const std::string &file, const std::string &branch_group_path)
@@ -778,7 +851,7 @@ void locate_all_floquet_bifurcations_inplace(const std::string &file, const std:
     const int nsol = get_number_of_solutions(root);
     if (!root.nameExists("0/floquet")) {
         fmt::println("skipping '{}' because no Floquet data was found\n"
-                     "make sure to run `twist postprocess {} -s` before bifurcation detection",
+                     "make sure to run `twist postprocess {} -f` before bifurcation detection",
             label, file);
         return;
     }

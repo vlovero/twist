@@ -67,8 +67,17 @@ int PostprocessArgs::run()
                 evaluate_spectrum_for_each_solution_inplace_distributed(steady_files, strategy);
             }
         }
+    }
+
+    if (floquet) {
         if (!hopf_targets.empty()) {
-            evaluate_floquet_for_each_solution_inplace(hopf_targets);
+            if (use_less_memory) {
+                evaluate_floquet_for_each_solution_inplace(hopf_targets);
+            }
+            else {
+                OpenBLASThreadContext __openblas_context(1);
+                evaluate_floquet_for_each_solution_inplace_distributed(hopf_targets);
+            }
         }
     }
 
