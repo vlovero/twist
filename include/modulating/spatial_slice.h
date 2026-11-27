@@ -54,6 +54,7 @@ namespace TWIST
         void freeBuffers();
 
         void init(size_t in_nstages, size_t in_node, size_t in_nnodes, const double *in_t, func_t in_func, func_t in_fjac, pjac_t in_pjac, const diffusion_t &diffusion, double in_unscaled_spatial_period);
+        void initCoarseFrom(const SpatialSlice &fine, size_t coarse_nstages);
         void initFromCollocator(const Collocator &col);
         void updateGrid(size_t new_nnodes, const double *new_t);
 

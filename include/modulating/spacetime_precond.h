@@ -6,9 +6,38 @@
 #include "shared.h"
 #include <complex>
 #include <cstddef>
+#include <cstring>
 
 namespace TWIST
 {
+    enum class PrecondMode
+    {
+        SchurBE = 0,
+        SchurBDF2 = 1,
+        TwoLevel = 2,
+        DirectLagged = 3
+    };
+
+    inline PrecondMode parsePrecondMode(const char *name)
+    {
+        if (!name) return PrecondMode::SchurBE;
+        if (strcmp(name, "schur_bdf2") == 0 || strcmp(name, "bdf2") == 0) return PrecondMode::SchurBDF2;
+        if (strcmp(name, "two_level") == 0 || strcmp(name, "coarse_tree") == 0) return PrecondMode::TwoLevel;
+        if (strcmp(name, "direct_lagged") == 0 || strcmp(name, "direct") == 0) return PrecondMode::DirectLagged;
+        return PrecondMode::SchurBE;
+    }
+
+    inline const char *precondModeName(PrecondMode m)
+    {
+        switch (m) {
+        case PrecondMode::SchurBE: return "schur_be";
+        case PrecondMode::SchurBDF2: return "schur_bdf2";
+        case PrecondMode::TwoLevel: return "two_level";
+        case PrecondMode::DirectLagged: return "direct_lagged";
+        }
+        return "schur_be";
+    }
+
     class RealSchurSpaceTimePrecond
     {
     public:
@@ -24,8 +53,8 @@ namespace TWIST
 
         // Updates the preconditioner from the current N_t slices, condensers, temporal step sizes dtau[0..nt-1],
         // scalar period T, parameter vector p, and theta (default 1.0, L-stable for DAE algebraic modes).
-        void update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0);
-        void update(size_t nt, const SpatialSlice *const *slice_ptrs, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0);
+        void update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0, bool use_bdf2 = false);
+        void update(size_t nt, const SpatialSlice *const *slice_ptrs, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta = 1.0, bool use_bdf2 = false);
 
         // Applies z = P_ST^(-1) * r on the condensed endpoint space (sum_n slices[n].n_space).
         // `r` and `z` may NOT alias.
@@ -56,6 +85,7 @@ namespace TWIST
         size_t m_total_end = 0;
         double m_T = 1.0;
         double m_theta = 0.55;
+        bool m_use_bdf2 = false;
         bool m_is_block_diag = false;
 
         SpatialSlice m_ref_slice;
@@ -69,6 +99,8 @@ namespace TWIST
         // Per-slice offsets & mesh transfers
         size_t *m_offsets = nullptr;
         double *m_dtau = nullptr;
+        double *m_bdf_b1 = nullptr;
+        double *m_bdf_b2 = nullptr;
         SparseDenseOutputOp *m_to_ref = nullptr;
         SparseDenseOutputOp *m_from_ref = nullptr;
         size_t *m_sig_nnodes = nullptr;

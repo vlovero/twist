@@ -245,6 +245,32 @@ namespace TWIST
         updateGrid(in_nnodes, in_t);
     }
 
+    void SpatialSlice::initCoarseFrom(const SpatialSlice &fine, size_t coarse_nstages)
+    {
+        diffusion_t diff(fine.ndiff);
+        for (size_t i = 0; i < fine.ndiff; i++) {
+            diff[i].first = fine.to_delete[i] - (int)(i + 1);
+            diff[i].second = fine.diff_coeffs[i];
+        }
+        init(coarse_nstages, fine.node, fine.nnodes, fine.t, fine.func, fine.fjac, fine.pjac, diff, fine.unscaled_spatial_period);
+        if (M && fine.M && node > 0) {
+            memcpy(M, fine.M, node * node * sizeof(double));
+            memcpy(dM_dc, fine.dM_dc, node * node * sizeof(double));
+            m_nnz = fine.m_nnz;
+            if (m_nnz > 0 && fine.m_rows) {
+                memcpy(m_rows, fine.m_rows, m_nnz * sizeof(int));
+                memcpy(m_cols, fine.m_cols, m_nnz * sizeof(int));
+                memcpy(m_vals, fine.m_vals, m_nnz * sizeof(double));
+            }
+            dm_nnz = fine.dm_nnz;
+            if (dm_nnz > 0 && fine.dm_rows) {
+                memcpy(dm_rows, fine.dm_rows, dm_nnz * sizeof(int));
+                memcpy(dm_cols, fine.dm_cols, dm_nnz * sizeof(int));
+                memcpy(dm_vals, fine.dm_vals, dm_nnz * sizeof(double));
+            }
+        }
+    }
+
     void SpatialSlice::initFromCollocator(const Collocator &col)
     {
         // const_cast avoided by reading non-const via Collocator copy or pointer if needed;
@@ -700,8 +726,9 @@ namespace TWIST
                 xi = 1.0;
             }
             else {
-                const size_t k_dst = q / n_basis;
-                const size_t s_dst = q % n_basis;
+                const size_t dst_basis = dst.nstages + 1;
+                const size_t k_dst = q / dst_basis;
+                const size_t s_dst = q % dst_basis;
                 xi = (s_dst == 0) ? dst.t[k_dst] : (dst.t[k_dst] + dst.c_c[s_dst - 1] * dst.h[k_dst]);
                 if (xi < 0.0) {
                     xi = 0.0;

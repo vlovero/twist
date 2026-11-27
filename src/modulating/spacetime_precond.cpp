@@ -23,6 +23,14 @@ namespace TWIST
             free(m_dtau);
             m_dtau = nullptr;
         }
+        if (m_bdf_b1) {
+            free(m_bdf_b1);
+            m_bdf_b1 = nullptr;
+        }
+        if (m_bdf_b2) {
+            free(m_bdf_b2);
+            m_bdf_b2 = nullptr;
+        }
         if (m_to_ref) {
             delete[] m_to_ref;
             m_to_ref = nullptr;
@@ -115,6 +123,8 @@ namespace TWIST
         if (m_slice_cap < nt) {
             m_offsets = (size_t *)realloc(m_offsets, (nt + 1) * sizeof(size_t));
             m_dtau = (double *)realloc(m_dtau, nt * sizeof(double));
+            m_bdf_b1 = (double *)realloc(m_bdf_b1, nt * sizeof(double));
+            m_bdf_b2 = (double *)realloc(m_bdf_b2, nt * sizeof(double));
             delete[] m_to_ref;
             delete[] m_from_ref;
             m_to_ref = new SparseDenseOutputOp[nt];
@@ -172,22 +182,23 @@ namespace TWIST
         (void)total_end;
     }
 
-    void RealSchurSpaceTimePrecond::update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta)
+    void RealSchurSpaceTimePrecond::update(size_t nt, const SpatialSlice *slices, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta, bool use_bdf2)
     {
         std::vector<const SpatialSlice *> ptrs(nt);
         for (size_t n = 0; n < nt; n++) {
             ptrs[n] = &slices[n];
         }
-        update(nt, ptrs.data(), condensers, y_end, dtau, T, p, theta);
+        update(nt, ptrs.data(), condensers, y_end, dtau, T, p, theta, use_bdf2);
     }
 
-    void RealSchurSpaceTimePrecond::update(size_t nt, const SpatialSlice *const *slice_ptrs, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta)
+    void RealSchurSpaceTimePrecond::update(size_t nt, const SpatialSlice *const *slice_ptrs, const SubintervalCondenser *condensers, const double *y_end, const double *dtau, double T, const double *p, double theta, bool use_bdf2)
     {
         (void)condensers;
         const bool nt_changed = (m_nt != nt);
         m_nt = nt;
         m_T = T;
-        m_theta = theta;
+        m_theta = (use_bdf2 && nt >= 3) ? 1.0 : theta;
+        m_use_bdf2 = (use_bdf2 && nt >= 3);
 
         // Choose reference mesh: slice with the largest number of subintervals (already adapted to sharpest front),
         // or copy slice_ptrs[0] if all equal.
@@ -259,11 +270,29 @@ namespace TWIST
         const int int_nt = (int)nt;
         double *D_tau = m_S_tau;
         memset(D_tau, 0, nt * nt * sizeof(double));
-        for (size_t n = 0; n < nt; n++) {
-            const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
-            const double inv_dt = 1.0 / m_dtau[n];
-            D_tau[n * nt + n] += inv_dt;
-            D_tau[prev * nt + n] -= inv_dt;
+        if (m_use_bdf2) {
+            for (size_t n = 0; n < nt; n++) {
+                const size_t prev1 = (n == 0) ? (nt - 1) : (n - 1);
+                const size_t prev2 = (prev1 == 0) ? (nt - 1) : (prev1 - 1);
+                const double h1 = m_dtau[n];
+                const double h0 = m_dtau[prev1];
+                const double a_n = 1.0 / h1 + 1.0 / (h1 + h0);
+                const double b_n = -(h1 + h0) / (h1 * h0);
+                const double c_n = h0 / (h1 * (h1 + h0));
+                m_bdf_b1[n] = b_n;
+                m_bdf_b2[n] = c_n;
+                D_tau[n * nt + n] += a_n;
+                D_tau[prev1 * nt + n] += b_n;
+                D_tau[prev2 * nt + n] += c_n;
+            }
+        }
+        else {
+            for (size_t n = 0; n < nt; n++) {
+                const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
+                const double inv_dt = 1.0 / m_dtau[n];
+                D_tau[n * nt + n] += inv_dt;
+                D_tau[prev * nt + n] -= inv_dt;
+            }
         }
 
         double *M_inv_save = m_work + nt * nt;
@@ -460,9 +489,17 @@ namespace TWIST
             double *tmp_ref = thread_tmp + tid * n_ref;
             const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
             m_to_ref[prev].apply(&r[m_offsets[prev]], tmp_ref);
-            m_ref_slice.applyMassOpSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, tmp_ref, &r_ref[n * n_ref], 1.0 / m_dtau[n], 0.0);
-            if (m_theta != 1.0) {
-                m_ref_jac.gemv(1.0, &r_ref[n * n_ref], (1.0 - m_theta) * m_T, tmp_ref);
+            if (m_use_bdf2) {
+                const size_t prev2 = (prev == 0) ? (nt - 1) : (prev - 1);
+                m_ref_slice.applyMassOpSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, tmp_ref, &r_ref[n * n_ref], -m_bdf_b1[n], 0.0);
+                m_to_ref[prev2].apply(&r[m_offsets[prev2]], tmp_ref);
+                m_ref_slice.applyMassOpSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, tmp_ref, &r_ref[n * n_ref], -m_bdf_b2[n], 1.0);
+            }
+            else {
+                m_ref_slice.applyMassOpSparse(m_ref_slice.m_nnz, m_ref_slice.m_rows, m_ref_slice.m_cols, m_ref_slice.m_vals, tmp_ref, &r_ref[n * n_ref], 1.0 / m_dtau[n], 0.0);
+                if (m_theta != 1.0) {
+                    m_ref_jac.gemv(1.0, &r_ref[n * n_ref], (1.0 - m_theta) * m_T, tmp_ref);
+                }
             }
         }
 
