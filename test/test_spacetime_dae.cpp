@@ -4,6 +4,7 @@
 #include "krylov/gmres.h"
 #include "linalg.h"
 #include "modulating/radau_dg.h"
+#include "modulating/coarse_tree_precond.h"
 #include "modulating/spacetime_precond.h"
 #include "modulating/spatial_slice.h"
 #include "modulating/subinterval_condenser.h"
@@ -985,6 +986,408 @@ namespace
         fmt::println("[Test 9] GMRES CGS2/DGKS: it1={} (err={:.2e}), it2={} (err={:.2e}), it3={} (err={:.2e})",
             it1, e1, it2, e2, it3, e3);
     }
+
+    void verify_bgs_irk_and_umfpack_condenser()
+    {
+        // Stiff 3-variable reaction-diffusion with 1000x Jacobian jump across Radau stages
+        const size_t node = 3;
+        const size_t ncol = 8;
+        const size_t nnodes = 14;
+        const double L0 = 2.0;
+        const double p[4] = { 0.85, 0.25, 2.0, 0.75 };
+        const diffusion_t diff = { { 0, TEST_D } };
+
+        auto stiff_jump_fjac = [](const double *z, const double *pp, double *out) {
+            const double v = z[0], w = z[2];
+            const double c = pp[0], sps = pp[3];
+            // Sharp nonlinear upstroke spike around v ~ 0.3
+            const double exc = 1500.0 * std::exp(-25.0 * (v - 0.3) * (v - 0.3));
+            const double df1_dv = exc - 50.0 - 3.0 * v * v;
+            const double df1_dw = -4.0 - 2.0 * v * w;
+            const double df2_dv = 3.0;
+            const double df2_dw = -15.0 - 20.0 * w * w;
+            out[0] = 0.0;                 out[1] = sps;            out[2] = 0.0;
+            out[3] = -sps * df1_dv / TEST_D; out[4] = sps * c / TEST_D; out[5] = -sps * df1_dw / TEST_D;
+            out[6] = sps * df2_dv / c;    out[7] = 0.0;            out[8] = sps * df2_dw / c;
+        };
+
+        std::vector<double> t(nnodes);
+        for (size_t i = 0; i < nnodes; i++) {
+            t[i] = (double)i / (double)(nnodes - 1);
+        }
+        TWIST::SpatialSlice sl;
+        sl.init(ncol, node, nnodes, t.data(), test_func, +stiff_jump_fjac, test_pjac, diff, 2.0 * L0);
+        sl.updateMassMatrices(p[0], p[3]);
+
+        const size_t ns = sl.n_space;
+        const double dtau_T = 12.0;
+
+        for (size_t st : { (size_t)2, (size_t)3, (size_t)4 }) {
+            std::vector<double> y_stages(st * ns);
+            for (size_t l = 0; l < st; l++) {
+                for (size_t i = 0; i < ns; i++) {
+                    const double xi = (double)(i / node) / (double)(sl.nPoints());
+                    const size_t comp = i % node;
+                    if (comp == 0) {
+                        // Front sweeps right across v ~ 0.3 during stages l = 0..st-1
+                        y_stages[l * ns + i] = -0.2 + 0.35 * (double)l + 0.4 * std::sin(2.0 * M_PI * xi);
+                    }
+                    else if (comp == 1) {
+                        y_stages[l * ns + i] = 0.5 * std::cos(2.0 * M_PI * xi);
+                    }
+                    else {
+                        y_stages[l * ns + i] = 0.2 * (double)l * std::cos(2.0 * M_PI * xi);
+                    }
+                }
+            }
+
+            constexpr size_t K = 4;
+            std::vector<double> rhs_1(st * ns), rhs_batch(st * ns * K);
+            for (size_t c = 0; c < K; c++) {
+                for (size_t l = 0; l < st; l++) {
+                    for (size_t i = 0; i < ns; i++) {
+                        const double val = std::cos(0.17 * (double)(i + 1) + 0.6 * (double)(c + l));
+                        rhs_batch[(l * K + c) * ns + i] = val;
+                        if (c == 0) rhs_1[l * ns + i] = val;
+                    }
+                }
+            }
+
+            // Reference: UMFPACK exact direct solve
+            TWIST::SubintervalCondenser cond_umf;
+            cond_umf.setMode(TWIST::LocalStageSolverMode::Umfpack);
+            cond_umf.factor(&sl, st, y_stages.data(), p, dtau_T, true);
+
+            std::vector<double> dk_umf(st * ns), op_umf(st * ns);
+            cond_umf.solveLocalStages(rhs_1.data(), dk_umf.data(), true, 1e-12);
+            cond_umf.applyStageOperator(dk_umf.data(), op_umf.data());
+            double umf_res = 0.0, rhs_nrm = 0.0;
+            for (size_t i = 0; i < st * ns; i++) {
+                umf_res += (op_umf[i] - rhs_1[i]) * (op_umf[i] - rhs_1[i]);
+                rhs_nrm += rhs_1[i] * rhs_1[i];
+            }
+            const double rel_umf = std::sqrt(umf_res / rhs_nrm);
+            CHECK(rel_umf < 1e-12);
+
+            // BGS-IRK single + batch + HybridUmfpack (factor -> fallback promotes -> second factor uses UMFPACK)
+            for (auto mode : { TWIST::LocalStageSolverMode::BlockGaussSeidel, TWIST::LocalStageSolverMode::HybridUmfpack }) {
+                TWIST::SubintervalCondenser cond;
+                cond.setMode(mode);
+                cond.factor(&sl, st, y_stages.data(), p, dtau_T, true);
+
+                std::vector<double> dk_1(st * ns), dk_b(st * ns * K), op_out(st * ns);
+                cond.solveLocalStages(rhs_1.data(), dk_1.data(), true, 1e-12);
+                if (mode == TWIST::LocalStageSolverMode::HybridUmfpack) {
+                    // Self-promoting hybrid switches to exact UMFPACK on next factor after local GMRES fallback
+                    cond.factor(&sl, st, y_stages.data(), p, dtau_T, true);
+                    cond.solveLocalStages(rhs_1.data(), dk_1.data(), true, 1e-12);
+                }
+                cond.applyStageOperator(dk_1.data(), op_out.data());
+
+                double res2 = 0.0, diff_umf = 0.0, umf_nrm = 0.0;
+                for (size_t i = 0; i < st * ns; i++) {
+                    res2 += (op_out[i] - rhs_1[i]) * (op_out[i] - rhs_1[i]);
+                    diff_umf += (dk_1[i] - dk_umf[i]) * (dk_1[i] - dk_umf[i]);
+                    umf_nrm += dk_umf[i] * dk_umf[i];
+                }
+                const double rel_res = std::sqrt(res2 / rhs_nrm);
+                const double rel_sol = std::sqrt(diff_umf / umf_nrm);
+
+                cond.solveLocalStagesBatch(K, rhs_batch.data(), dk_b.data(), true, 1e-12);
+                double batch_diff = 0.0;
+                for (size_t l = 0; l < st; l++) {
+                    for (size_t i = 0; i < ns; i++) {
+                        batch_diff = std::max(batch_diff, std::abs(dk_b[(l * K + 0) * ns + i] - dk_1[l * ns + i]));
+                    }
+                }
+                fmt::println("[Test 10] st={} {}: rel_res={:.2e}, rel_sol_vs_umf={:.2e}, batch_diff={:.2e}, rich={}, lgmres={}",
+                    st, TWIST::localStageSolverModeName(mode), rel_res, rel_sol, batch_diff,
+                    cond.statRichardsonSweeps(), cond.statGmresFallbacks());
+                CHECK(rel_res < 1e-10);
+                CHECK(rel_sol < 1e-10);
+                CHECK(batch_diff < 1e-10);
+            }
+        }
+    }
+
+    void verify_fgmres_and_recycling()
+    {
+        // Poorly conditioned non-normal system with 3 slow modes + weighted norm
+        const size_t n = 48;
+        std::vector<double> A(n * n, 0.0), M_diag(n, 1.0), wts(n, 1.0);
+        for (size_t i = 0; i < n; i++) {
+            double diag = (i < 3) ? (0.01 * (double)(i + 1)) : (1.0 + 0.1 * (double)(i - 3));
+            A[i * n + i] = diag;
+            M_diag[i] = (i < 3) ? 1.0 : diag;
+            if (i + 1 < n) {
+                A[(i + 1) * n + i] = 0.25;
+            }
+            wts[i] = 1.0 + 0.5 * std::sin((double)i);
+        }
+        std::vector<double> b1(n), b2(n);
+        for (size_t i = 0; i < n; i++) {
+            b1[i] = std::cos(0.3 * (double)i) + ((i < 3) ? 5.0 : 0.2);
+            b2[i] = std::sin(0.2 * (double)i) + ((i < 3) ? 4.0 : 0.3);
+        }
+
+        auto A_op = [&](const RP(double) x, RP(double) y, size_t nn, double) -> int {
+            for (size_t r = 0; r < nn; r++) {
+                double s = 0.0;
+                for (size_t c = 0; c < nn; c++) {
+                    s += A[c * nn + r] * x[c];
+                }
+                y[r] = s;
+            }
+            return 0;
+        };
+        // Preconditioner with deliberate tol-dependent perturbation (requires flexible Krylov)
+        auto M_op = [&](const RP(double) r, RP(double) z, size_t nn, double tol) -> int {
+            const double t_eff = (tol > 0.0) ? tol : 1e-12;
+            for (size_t i = 0; i < nn; i++) {
+                const double jitter = 1.0 + std::min(0.05, 100.0 * t_eff) * std::sin((double)i * 1.7);
+                z[i] = (r[i] / M_diag[i]) * jitter;
+            }
+            return 0;
+        };
+
+        auto rel_res = [&](const std::vector<double> &x, const std::vector<double> &b) -> double {
+            std::vector<double> ax(n);
+            A_op(x.data(), ax.data(), n, 1e-15);
+            double num = 0.0, den = 0.0;
+            for (size_t i = 0; i < n; i++) {
+                num += wts[i] * (b[i] - ax[i]) * (b[i] - ax[i]);
+                den += wts[i] * b[i] * b[i];
+            }
+            return std::sqrt(num / den);
+        };
+
+        const int restart = 12;
+        const int maxiter = 120;
+
+        // Compare restarted GMRES(12), FGMRES(12), LGMRES(12,4), GCRO-DR(12,4) on two consecutive solves
+        int nit_gm = 0, nit_fgm = 0, nit_lgm1 = 0, nit_lgm2 = 0, nit_gc1 = 0, nit_gc2 = 0;
+        std::vector<double> x_gm(n, 0.0), x_fgm(n, 0.0), x_lgm1(n, 0.0), x_lgm2(n, 0.0), x_gc1(n, 0.0), x_gc2(n, 0.0);
+        std::vector<double> wk(Krylov::fgmres_lwork(n, restart, 4));
+        Krylov::GmresRecycleState rec_lgm, rec_gc;
+
+        int st_gm = Krylov::fgmres(A_op, M_op, n, x_gm.data(), b2.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_gm, Krylov::KrylovMethod::GMRES, nullptr, 0, true, 1e-12);
+        int st_fgm = Krylov::fgmres(A_op, M_op, n, x_fgm.data(), b1.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_fgm, Krylov::KrylovMethod::FGMRES, nullptr, 0, true, 1e-12);
+        int st_lgm1 = Krylov::fgmres(A_op, M_op, n, x_lgm1.data(), b1.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_lgm1, Krylov::KrylovMethod::LGMRES, &rec_lgm, 4, true, 1e-12);
+        int st_lgm2 = Krylov::fgmres(A_op, M_op, n, x_lgm2.data(), b2.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_lgm2, Krylov::KrylovMethod::LGMRES, &rec_lgm, 4, false, 1e-12);
+        int st_gc1 = Krylov::fgmres(A_op, M_op, n, x_gc1.data(), b1.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_gc1, Krylov::KrylovMethod::GCRODR, &rec_gc, 4, true, 1e-12);
+        int st_gc2 = Krylov::fgmres(A_op, M_op, n, x_gc2.data(), b2.data(), wts.data(), wk.data(), restart, maxiter, 1e-11, 1e-14, &nit_gc2, Krylov::KrylovMethod::GCRODR, &rec_gc, 4, false, 1e-12);
+
+        const double rr_gm = rel_res(x_gm, b2);
+        const double rr_fgm = rel_res(x_fgm, b1);
+        const double rr_lgm2 = rel_res(x_lgm2, b2);
+        const double rr_gc1 = rel_res(x_gc1, b1);
+        const double rr_gc2 = rel_res(x_gc2, b2);
+
+        fmt::println("[Test 11] iters: gm={} (res={:.2e}), fgm={} (res={:.2e}), lgm=({},{}, res={:.2e}), gcrodr=({},{}, res1={:.2e}, res2={:.2e})",
+            nit_gm, rr_gm, nit_fgm, rr_fgm, nit_lgm1, nit_lgm2, rr_lgm2, nit_gc1, nit_gc2, rr_gc1, rr_gc2);
+        CHECK(st_gm == 0 && rr_gm < 1e-10);
+        CHECK(st_fgm == 0 && rr_fgm < 1e-10);
+        CHECK(st_lgm1 == 0 && st_lgm2 == 0 && rr_lgm2 < 1e-10);
+        CHECK(st_gc1 == 0 && st_gc2 == 0 && rr_gc1 < 1e-10 && rr_gc2 < 1e-10);
+        CHECK(nit_gc2 < nit_gm);
+    }
+
+    void verify_coarse_tree_precond()
+    {
+        // 1. CyclicWindowTree exact solve across both even (M=4) and odd (M=5) variable-dim cyclic systems
+        for (size_t M : { (size_t)4, (size_t)5 }) {
+            std::vector<size_t> dims(M);
+            size_t tot = 0;
+            for (size_t w = 0; w < M; w++) {
+                dims[w] = 5 + (w % 3) * 2;
+                tot += dims[w];
+            }
+            std::vector<std::vector<double>> B_mats(M);
+            std::vector<const double *> B_ptrs(M);
+            for (size_t w = 0; w < M; w++) {
+                const size_t prev = (w == 0) ? (M - 1) : (w - 1);
+                B_mats[w].resize(dims[w] * dims[prev]);
+                for (size_t c = 0; c < dims[prev]; c++) {
+                    for (size_t r = 0; r < dims[w]; r++) {
+                        B_mats[w][c * dims[w] + r] = ((r == c) ? 0.35 : 0.0) + 0.04 * std::sin((double)(w * 7 + r * 3 + c));
+                    }
+                }
+                B_ptrs[w] = B_mats[w].data();
+            }
+
+            std::vector<double> u_exact(tot), f(tot), u_tree(tot);
+            for (size_t i = 0; i < tot; i++) {
+                u_exact[i] = std::cos(0.4 * (double)i + 0.3);
+            }
+            std::vector<size_t> offs(M + 1, 0);
+            for (size_t w = 0; w < M; w++) offs[w + 1] = offs[w] + dims[w];
+            for (size_t w = 0; w < M; w++) {
+                const size_t prev = (w == 0) ? (M - 1) : (w - 1);
+                for (size_t r = 0; r < dims[w]; r++) {
+                    double bu = 0.0;
+                    for (size_t c = 0; c < dims[prev]; c++) {
+                        bu += B_mats[w][c * dims[w] + r] * u_exact[offs[prev] + c];
+                    }
+                    f[offs[w] + r] = u_exact[offs[w] + r] - bu;
+                }
+            }
+
+            TWIST::CyclicWindowTree tree;
+            tree.buildAndFactor(M, dims.data(), B_ptrs.data());
+            CHECK(tree.isReady());
+            tree.apply(f.data(), u_tree.data());
+            double max_err = 0.0;
+            for (size_t i = 0; i < tot; i++) {
+                max_err = std::max(max_err, std::abs(u_tree[i] - u_exact[i]));
+            }
+            fmt::println("[Test 12a] CyclicWindowTree M={} exact rel err = {:.3e}", M, max_err);
+            CHECK(max_err < 1e-13);
+        }
+
+        // 2. TwoLevelTreePrecond on time-varying stiff Advection-Diffusion-Reaction with adaptivity
+        const size_t nt = 8;
+        const size_t st = 3;
+        const size_t M = 4;
+        std::vector<TWIST::SpatialSlice> slices(nt);
+        std::vector<TWIST::SparseDenseOutputOp> transfers(nt);
+        std::vector<TWIST::SubintervalCondenser> condensers(nt);
+        std::vector<double> dtau(nt, 1.0 / (double)nt);
+        std::vector<size_t> w_start(M), w_end(M);
+        for (size_t w = 0; w < M; w++) {
+            w_start[w] = (w * nt) / M;
+            w_end[w] = ((w + 1) * nt) / M;
+        }
+        std::vector<double> grid_a = { 0.0, 0.25, 0.5, 0.75, 1.0 };
+        std::vector<double> grid_b = { 0.0, 0.2, 0.45, 0.7, 0.85, 1.0 };
+        diffusion_t diff = { { 0, TEST_D } };
+        const double p[4] = { 0.85, 0.25, 2.0, 0.75 };
+        const double T = 4.0;
+        for (size_t n = 0; n < nt; n++) {
+            const auto &g = (n % 2 == 0) ? grid_a : grid_b;
+            slices[n].init(3, 3, g.size(), g.data(), test_func, test_fjac, test_pjac, diff, 2.0);
+            slices[n].updateMassMatrices(p[0], p[3]);
+        }
+        std::vector<double> y_stages;
+        size_t tot_stages = 0, W_end = 0;
+        for (size_t n = 0; n < nt; n++) tot_stages += st * slices[n].n_space;
+        for (size_t w = 0; w < M; w++) W_end += slices[w_end[w] - 1].n_space;
+        y_stages.resize(tot_stages);
+        for (size_t i = 0; i < tot_stages; i++) y_stages[i] = 0.2 * std::sin(0.15 * (double)i);
+
+        size_t soff = 0;
+        for (size_t n = 0; n < nt; n++) {
+            const size_t prev = (n == 0) ? (nt - 1) : (n - 1);
+            transfers[n].build(slices[prev], slices[n]);
+            condensers[n].factor(&slices[n], st, &y_stages[soff], p, dtau[n] * T, true);
+            soff += st * slices[n].n_space;
+        }
+
+        TWIST::TwoLevelTreePrecond two_lvl;
+        two_lvl.update(nt, M, w_start.data(), w_end.data(), slices.data(), st, y_stages.data(), dtau.data(), T, p, true);
+        CHECK(two_lvl.isReady());
+
+        TWIST::DirectTreePrecond dir_pc;
+        dir_pc.update(nt, M, w_start.data(), w_end.data(), slices.data(), condensers.data(), transfers.data(), false);
+        CHECK(dir_pc.isReady());
+
+        std::vector<double> r(W_end), z_tl(W_end), z_dir(W_end);
+        for (size_t i = 0; i < W_end; i++) r[i] = std::sin(0.27 * (double)i + 0.1);
+        two_lvl.apply(r.data(), z_tl.data());
+        dir_pc.apply(r.data(), z_dir.data());
+
+        // Check DirectTreePrecond solves exact M-window linear system A_win * z_dir = r to < 1e-12
+        std::vector<double> Az(W_end);
+        std::vector<size_t> w_offs(M + 1, 0);
+        for (size_t w = 0; w < M; w++) w_offs[w + 1] = w_offs[w] + slices[w_end[w] - 1].n_space;
+        for (size_t w = 0; w < M; w++) {
+            const size_t prev_w = (w == 0) ? (M - 1) : (w - 1);
+            const size_t e_prev = w_end[prev_w] - 1;
+            const size_t e = w_end[w] - 1;
+            std::vector<double> cur(z_dir.begin() + (ptrdiff_t)w_offs[prev_w], z_dir.begin() + (ptrdiff_t)(w_offs[prev_w] + slices[e_prev].n_space));
+            for (size_t n = w_start[w]; n < w_end[w]; n++) {
+                std::vector<double> nxt(slices[n].n_space);
+                condensers[n].applyCondensedC(cur.data(), transfers[n], nxt.data(), true, 1e-12);
+                cur.swap(nxt);
+            }
+            for (size_t i = 0; i < slices[e].n_space; i++) {
+                Az[w_offs[w] + i] = z_dir[w_offs[w] + i] - cur[i];
+            }
+        }
+        double dir_res = 0.0, r_nrm = 0.0, tl_nrm = 0.0;
+        for (size_t i = 0; i < W_end; i++) {
+            dir_res += (Az[i] - r[i]) * (Az[i] - r[i]);
+            r_nrm += r[i] * r[i];
+            tl_nrm += z_tl[i] * z_tl[i];
+        }
+        const double rel_dir = std::sqrt(dir_res / r_nrm);
+        fmt::println("[Test 12b] DirectTreePrecond exact A_win res={:.3e}, ||z_two_lvl||={:.3e}", rel_dir, std::sqrt(tl_nrm));
+        CHECK(rel_dir < 1e-10);
+        CHECK(std::isfinite(tl_nrm) && tl_nrm > 0.0);
+
+        // 3. Stage-tangent reconstruction matches applyCondensedCAllStages endpoints & residual
+        const size_t ns0 = slices[0].n_space;
+        std::vector<double> dk_p_all(tot_stages, 0.0), prop_all(tot_stages, 0.0), x_end(W_end, 0.0);
+        for (size_t i = 0; i < W_end; i++) x_end[i] = std::cos(0.19 * (double)i);
+        // Solve stage-level tangent check on slice 0 via applyCondensedCAllStages vs applyCondensedC
+        condensers[0].applyCondensedCAllStages(x_end.data(), transfers[0], prop_all.data(), true, 1e-12);
+        std::vector<double> c_end(ns0);
+        condensers[0].applyCondensedC(x_end.data(), transfers[0], c_end.data(), true, 1e-12);
+        double stg_end_err = 0.0;
+        for (size_t i = 0; i < ns0; i++) {
+            stg_end_err = std::max(stg_end_err, std::abs(prop_all[(st - 1) * ns0 + i] - c_end[i]));
+        }
+        fmt::println("[Test 13] applyCondensedCAllStages endpoint match err={:.3e}", stg_end_err);
+        CHECK(stg_end_err < 1e-12);
+    }
+
+    void verify_tcolmat_blas3_openmp()
+    {
+        // Verify DEV::linalg::gemm and DEV::linalg::trsm produce identical results inside an OpenMP parallel region
+        // when OpenBLASThreadContext(1) sets openblas_get_num_threads() == 1 (allowing AMX BLAS3 dispatch for size > 16).
+        const int M = 36, N = 18, K = 36;
+        std::vector<double> L(M * M, 0.0), A(M * K, 0.0), B(K * N, 0.0);
+        for (int j = 0; j < M; j++) {
+            L[j * M + j] = 2.0 + 0.05 * (double)j;
+            for (int i = j + 1; i < M; i++) {
+                L[j * M + i] = 0.02 * std::sin(0.3 * (double)(i + j));
+            }
+            for (int i = 0; i < K; i++) {
+                A[i * M + j] = std::cos(0.11 * (double)(j + 3 * i));
+            }
+        }
+        for (int j = 0; j < N; j++) {
+            for (int i = 0; i < K; i++) {
+                B[j * K + i] = std::sin(0.17 * (double)(i + 5 * j));
+            }
+        }
+
+        std::vector<double> C_seq(M * N, 0.1), C_omp(M * N, 0.1);
+        std::vector<double> X_seq = B, X_omp = B;
+        DEV::linalg::gemm<double>("N", "N", M, N, K, -1.0, A.data(), M, B.data(), K, 1.0, C_seq.data(), M);
+        DEV::linalg::trsm<double>("L", "L", "N", "U", M, N, 1.0, L.data(), M, X_seq.data(), M);
+
+        {
+            OpenBLASThreadContext blas_guard(1);
+#pragma omp parallel for schedule(static) num_threads(2)
+            for (int tid = 0; tid < 2; tid++) {
+                if (tid == 0) {
+                    DEV::linalg::gemm<double>("N", "N", M, N, K, -1.0, A.data(), M, B.data(), K, 1.0, C_omp.data(), M);
+                    DEV::linalg::trsm<double>("L", "L", "N", "U", M, N, 1.0, L.data(), M, X_omp.data(), M);
+                }
+            }
+        }
+
+        double max_gemm_err = 0.0, max_trsm_err = 0.0;
+        for (size_t i = 0; i < C_seq.size(); i++) {
+            max_gemm_err = std::max(max_gemm_err, std::abs(C_seq[i] - C_omp[i]));
+        }
+        for (size_t i = 0; i < X_seq.size(); i++) {
+            max_trsm_err = std::max(max_trsm_err, std::abs(X_seq[i] - X_omp[i]));
+        }
+        fmt::println("[Test 14] tcolmat OpenMP BLAS3 dispatch (36x18): gemm_err={:.3e}, trsm_err={:.3e}", max_gemm_err, max_trsm_err);
+        CHECK(max_gemm_err < 1e-13);
+        CHECK(max_trsm_err < 1e-13);
+    }
 } // namespace
 
 int main()
@@ -996,6 +1399,10 @@ int main()
     verify_factored_delta_j_condenser();
     verify_parallel_precond_apply();
     verify_gmres_cgs2_dgks();
+    verify_bgs_irk_and_umfpack_condenser();
+    verify_fgmres_and_recycling();
+    verify_coarse_tree_precond();
+    verify_tcolmat_blas3_openmp();
     fmt::println("ALL test_spacetime_dae CHECKS PASSED!");
     return 0;
 }

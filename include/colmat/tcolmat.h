@@ -69,7 +69,7 @@ namespace DEV
                 return;
             }
             const bool no_trans = (transa[0] == 'N' || transa[0] == 'n');
-            if (no_trans && ((omp_in_parallel() != 0) || (n == 1) || (m <= 16 && n <= 16))) {
+            if (no_trans && ((omp_in_parallel() != 0 && openblas_get_num_threads() > 1) || (n == 1) || (m <= 16 && n <= 16))) {
                 const bool left = (side[0] == 'L' || side[0] == 'l');
                 const bool lower = (uplo[0] == 'L' || uplo[0] == 'l');
                 const bool unit = (diag[0] == 'U' || diag[0] == 'u');
@@ -177,7 +177,7 @@ namespace DEV
                 gemv<data_t>(transa, m_mat, n_mat, alpha, a, lda, b, 1, beta, c, 1);
                 return;
             }
-            if (ta_n && tb_n && ((omp_in_parallel() != 0) || (std::max({ nrow_op_a, ncol_op_b, nrow_op_b }) <= 16))) {
+            if (ta_n && tb_n && ((omp_in_parallel() != 0 && openblas_get_num_threads() > 1) || (std::max({ nrow_op_a, ncol_op_b, nrow_op_b }) <= 16))) {
                 for (int j = 0; j < ncol_op_b; j++) {
                     RP(data_t) Cj = &c[(size_t)j * ldc];
                     if (beta == data_t(0.0)) {

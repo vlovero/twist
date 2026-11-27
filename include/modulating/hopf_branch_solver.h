@@ -2,6 +2,8 @@
 
 #include "H5Cpp.h"
 #include "collocator.h"
+#include "krylov/gmres.h"
+#include "modulating/coarse_tree_precond.h"
 #include "modulating/floquet.h"
 #include "modulating/radau_dg.h"
 #include "modulating/spacetime_precond.h"
@@ -148,7 +150,7 @@ namespace TWIST
         void collectCondenserStats();
 
     private:
-        void allocateForGrid(size_t nt, size_t st, const size_t *slice_nnodes);
+        void allocateForGrid(size_t nt, size_t st, const size_t *slice_nnodes, bool preserve_direct_precond = false);
         void rebuildOffsetsAndWeights();
         void rebuildTransfers();
         void syncEndpointsFromStages(double *end_out) const;
@@ -203,6 +205,13 @@ namespace TWIST
         SparseDenseOutputOp *m_transfers = nullptr;
         SubintervalCondenser *m_condensers = nullptr;
         RealSchurSpaceTimePrecond m_precond;
+        TwoLevelTreePrecond m_two_level_precond;
+        DirectTreePrecond m_direct_precond;
+        PrecondMode m_precond_mode = (std::getenv("TWIST_HOPF_PRECOND") != nullptr)
+            ? parsePrecondMode(std::getenv("TWIST_HOPF_PRECOND"))
+            : PrecondMode::DirectLagged;
+        int m_direct_lag_max = read_positive_int_env("TWIST_HOPF_DIRECT_LAG", 16);
+        mutable int m_direct_lag_count = 0;
 
         size_t *m_end_offsets = nullptr;   // length m_nt + 1
         size_t *m_stage_offsets = nullptr; // length m_nt + 1
@@ -224,6 +233,9 @@ namespace TWIST
         double *m_g_space = nullptr;       // m_total_end (normalized spatial phase template)
         double *m_g_time = nullptr;        // m_total_end (normalized orthogonalized temporal phase template)
         double *m_tangent = nullptr;       // m_total_end + 3
+        double *m_tangent_stages = nullptr;// m_total_stages (full-stage tangent for exact predictor)
+        bool m_tangent_stages_valid = false;
+        int m_stage_pred_enabled = (std::getenv("TWIST_HOPF_STAGE_PRED") == nullptr || std::atoi(std::getenv("TWIST_HOPF_STAGE_PRED")) != 0) ? 1 : 0;
         double *m_weights_end = nullptr;   // m_total_end (temporal * spatial quadrature weights)
         double *m_weights_bord = nullptr;  // m_total_end + 3
 
@@ -238,6 +250,7 @@ namespace TWIST
         double *m_prop_stages = nullptr;   // m_total_stages (cached propagator stages)
         double *m_b_Y = nullptr;           // m_total_end
         double *m_J_Yp = nullptr;          // 3 * m_total_end (columns for c, T, alpha)
+        double *m_J_win_swept = nullptr;   // 3 * m_total_end (cached window-swept J_Yp columns)
         double *m_Minv_U = nullptr;        // 3 * m_total_end (P_ST^(-1) * J_Yp)
         double *m_bord_rhs = nullptr;      // m_total_end + 3
         double *m_bord_sol = nullptr;      // m_total_end + 3
@@ -258,6 +271,15 @@ namespace TWIST
         size_t m_direct_ipiv_cap = 0;
         mutable size_t m_win_M = 0;
         mutable size_t m_gmres_calls = 0;
+        mutable size_t m_win_J_cached_M = 0;
+        mutable bool m_win_J_cache_valid = false;
+        Krylov::KrylovMethod m_outer_krylov_method = (std::getenv("TWIST_HOPF_OUTER_SOLVER") != nullptr)
+            ? Krylov::parseKrylovMethod(std::getenv("TWIST_HOPF_OUTER_SOLVER"))
+            : Krylov::KrylovMethod::FGMRES;
+        int m_outer_recycle_k = read_positive_int_env("TWIST_HOPF_RECYCLE_K", 6);
+        mutable Krylov::GmresRecycleState m_krylov_rec;
+        mutable bool m_rec_c_stale = true;
+        mutable const double *m_last_rec_row3 = nullptr;
         int m_last_newton_iters = 0;
         bool m_condensed_fresh = false;
         double m_last_delta_norm = 1.0;
