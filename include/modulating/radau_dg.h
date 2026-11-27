@@ -24,6 +24,8 @@ namespace TWIST
         double leading_err_scale;   // 1 / (st!) scale for temporal error monitor
         const double *P_in;         // st x st, row-major T_s^(-1) * (A^R)^(-1)
         const double *gamma_ones;   // length st, T_s^(-1) * (A^R)^(-1) * 1_{st}
+        const double *L_irk;        // st x st, row-major Doolittle lower-triangular factor of A^R (A^R = L_irk * U_unit)
+        const double *L_irk_diff;   // st x st, row-major (A^R - L_irk)
     };
 
     const RadauDGMethod &getRadauDG(size_t st);

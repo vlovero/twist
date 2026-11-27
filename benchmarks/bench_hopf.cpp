@@ -334,11 +334,12 @@ static void BM_ColMat_SolveBatch64_Complex(benchmark::State &state)
 }
 
 template <int NODE, int NCOL, int NNODES, int NT>
-static void BM_Condenser_Factor(benchmark::State &state)
+static void BM_Condenser_Factor_Mode(benchmark::State &state, TWIST::LocalStageSolverMode mode)
 {
     OpenBLASThreadContext ob(1);
     const auto &fx = get_fixture<NODE, NCOL, NNODES, NT>();
     TWIST::SubintervalCondenser cond;
+    cond.setMode(mode);
     const double dtau_T = fx.dtau[0] * fx.T;
 
     for (auto _ : state) {
@@ -348,11 +349,12 @@ static void BM_Condenser_Factor(benchmark::State &state)
 }
 
 template <int NODE, int NCOL, int NNODES, int NT>
-static void BM_Condenser_ApplyCondensedC(benchmark::State &state)
+static void BM_Condenser_ApplyCondensedC_Mode(benchmark::State &state, TWIST::LocalStageSolverMode mode)
 {
     OpenBLASThreadContext ob(1);
     const auto &fx = get_fixture<NODE, NCOL, NNODES, NT>();
     TWIST::SubintervalCondenser cond;
+    cond.setMode(mode);
     const double dtau_T = fx.dtau[0] * fx.T;
     cond.factor(&fx.slice, fx.st, fx.y_stages.data(), fx.p, dtau_T, true);
     const size_t ns = fx.slice.n_space;
@@ -362,6 +364,42 @@ static void BM_Condenser_ApplyCondensedC(benchmark::State &state)
         cond.applyCondensedC(fx.y_end.data(), fx.transfers[0], out.data(), true);
         benchmark::DoNotOptimize(out.data());
     }
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_Factor(benchmark::State &state)
+{
+    BM_Condenser_Factor_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::HairerWanner);
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_Factor_BGS(benchmark::State &state)
+{
+    BM_Condenser_Factor_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::BlockGaussSeidel);
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_Factor_Umfpack(benchmark::State &state)
+{
+    BM_Condenser_Factor_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::Umfpack);
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_ApplyCondensedC(benchmark::State &state)
+{
+    BM_Condenser_ApplyCondensedC_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::HairerWanner);
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_ApplyCondensedC_BGS(benchmark::State &state)
+{
+    BM_Condenser_ApplyCondensedC_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::BlockGaussSeidel);
+}
+
+template <int NODE, int NCOL, int NNODES, int NT>
+static void BM_Condenser_ApplyCondensedC_Umfpack(benchmark::State &state)
+{
+    BM_Condenser_ApplyCondensedC_Mode<NODE, NCOL, NNODES, NT>(state, TWIST::LocalStageSolverMode::Umfpack);
 }
 
 template <int NODE, int NCOL, int NNODES, int NT>
@@ -473,7 +511,11 @@ BENCHMARK(BM_ColMat_Factor_Complex<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_ColMat_Solve_Complex<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_ColMat_SolveBatch64_Complex<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_Condenser_Factor<9, 8, 56, 24>)->Apply(apply_hopf_args);
+BENCHMARK(BM_Condenser_Factor_BGS<9, 8, 56, 24>)->Apply(apply_hopf_args);
+BENCHMARK(BM_Condenser_Factor_Umfpack<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_Condenser_ApplyCondensedC<9, 8, 56, 24>)->Apply(apply_hopf_args);
+BENCHMARK(BM_Condenser_ApplyCondensedC_BGS<9, 8, 56, 24>)->Apply(apply_hopf_args);
+BENCHMARK(BM_Condenser_ApplyCondensedC_Umfpack<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_Condenser_ComputeCondensedMatrix<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_Precond_Update<9, 8, 56, 24>)->Apply(apply_hopf_args);
 BENCHMARK(BM_Precond_Apply<9, 8, 56, 24>)->Apply(apply_hopf_args);

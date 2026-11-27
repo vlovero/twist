@@ -35,6 +35,43 @@ namespace TWIST
             }
             return out;
         }
+
+        template <size_t ST>
+        constexpr std::array<double, ST * ST> make_lu_lower(const double *A)
+        {
+            std::array<double, ST * ST> L{};
+            std::array<double, ST * ST> M{};
+            std::array<double, ST * ST> U{};
+            for (size_t i = 0; i < ST * ST; i++) {
+                M[i] = A[i];
+            }
+            for (size_t i = 0; i < ST; i++) {
+                U[i * ST + i] = 1.0;
+            }
+            for (size_t k = 0; k < ST; k++) {
+                L[k * ST + k] = M[k * ST + k];
+                for (size_t i = k + 1; i < ST; i++) {
+                    L[i * ST + k] = M[i * ST + k];
+                    U[k * ST + i] = M[k * ST + i] / L[k * ST + k];
+                }
+                for (size_t i = k + 1; i < ST; i++) {
+                    for (size_t j = k + 1; j < ST; j++) {
+                        M[i * ST + j] -= L[i * ST + k] * U[k * ST + j];
+                    }
+                }
+            }
+            return L;
+        }
+
+        template <size_t ST>
+        constexpr std::array<double, ST * ST> make_lu_diff(const double *A, const double *L)
+        {
+            std::array<double, ST * ST> diff{};
+            for (size_t i = 0; i < ST * ST; i++) {
+                diff[i] = A[i] - L[i];
+            }
+            return diff;
+        }
         // =====================================================================
         // dG(1) : 2-stage Radau IIA (order 3)
         // =====================================================================
@@ -164,28 +201,37 @@ namespace TWIST
 
         constexpr auto DG1_P_in = make_p_in<2>(DG1_T_inv, DG1_A_inv);
         constexpr auto DG1_gamma_ones = make_gamma_ones<2>(DG1_T_inv, DG1_A_inv_ones);
+        constexpr auto DG1_L_irk = make_lu_lower<2>(DG1_A);
+        constexpr auto DG1_L_irk_diff = make_lu_diff<2>(DG1_A, DG1_L_irk.data());
         constexpr auto DG2_P_in = make_p_in<3>(DG2_T_inv, DG2_A_inv);
         constexpr auto DG2_gamma_ones = make_gamma_ones<3>(DG2_T_inv, DG2_A_inv_ones);
+        constexpr auto DG2_L_irk = make_lu_lower<3>(DG2_A);
+        constexpr auto DG2_L_irk_diff = make_lu_diff<3>(DG2_A, DG2_L_irk.data());
         constexpr auto DG3_P_in = make_p_in<4>(DG3_T_inv, DG3_A_inv);
         constexpr auto DG3_gamma_ones = make_gamma_ones<4>(DG3_T_inv, DG3_A_inv_ones);
+        constexpr auto DG3_L_irk = make_lu_lower<4>(DG3_A);
+        constexpr auto DG3_L_irk_diff = make_lu_diff<4>(DG3_A, DG3_L_irk.data());
 
         constexpr RadauDGMethod METHOD_DG1 = {
             2, DG1_c, DG1_b, DG1_A, DG1_A_inv, DG1_A_inv_ones,
             DG1_T, DG1_T_inv, 0, 1, nullptr, DG1_complex_re, DG1_complex_im,
             DG1_D_tau, DG1_err_weights, 1.0 / 6.0,
-            DG1_P_in.data(), DG1_gamma_ones.data()
+            DG1_P_in.data(), DG1_gamma_ones.data(),
+            DG1_L_irk.data(), DG1_L_irk_diff.data()
         };
         constexpr RadauDGMethod METHOD_DG2 = {
             3, DG2_c, DG2_b, DG2_A, DG2_A_inv, DG2_A_inv_ones,
             DG2_T, DG2_T_inv, 1, 1, DG2_real_eigs, DG2_complex_re, DG2_complex_im,
             DG2_D_tau, DG2_err_weights, 1.0 / 120.0,
-            DG2_P_in.data(), DG2_gamma_ones.data()
+            DG2_P_in.data(), DG2_gamma_ones.data(),
+            DG2_L_irk.data(), DG2_L_irk_diff.data()
         };
         constexpr RadauDGMethod METHOD_DG3 = {
             4, DG3_c, DG3_b, DG3_A, DG3_A_inv, DG3_A_inv_ones,
             DG3_T, DG3_T_inv, 0, 2, nullptr, DG3_complex_re, DG3_complex_im,
             DG3_D_tau, DG3_err_weights, 1.0 / 5040.0,
-            DG3_P_in.data(), DG3_gamma_ones.data()
+            DG3_P_in.data(), DG3_gamma_ones.data(),
+            DG3_L_irk.data(), DG3_L_irk_diff.data()
         };
     } // namespace
 
